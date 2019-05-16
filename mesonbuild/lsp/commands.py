@@ -21,7 +21,8 @@ def run(options: argparse.Namespace):
     logger = logging.getLogger()
     sh = logging.StreamHandler(sys.stderr)
     logger.addHandler(sh)
-    if options.debug:
+    # Debug option doesn't seem to be passed by VS Code, overriding here for now
+    if True:
         logger.setLevel(logging.DEBUG)
         sh.setLevel(logging.DEBUG)
     else:
