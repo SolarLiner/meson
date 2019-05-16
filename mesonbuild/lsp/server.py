@@ -43,7 +43,6 @@ class MesonLanguageServer(MethodDispatcher):
     def capabilities(self):
         capabilities = {
             'completionProvider': True,
-            'hoverProvider': True,
             'textDocumentSync': consts.TextDocumentSyncKind.INCREMENTAL
         }
         return capabilities
