@@ -22,6 +22,7 @@ class Workspace:
         self.endpoint = endpoint
         self.documents = dict()
         self.ast = AstInterpreter(root_path, '')
+
         self.build_ast()
 
     def update(self, document, changes=None):
@@ -39,18 +40,26 @@ class Workspace:
 
     def build_ast(self):
         try:
-            return self.ast.visit()
-        except Exception as ex:
-            logger.error('AST parsing failed: %s\n%s', str(ex),
-                         ex.__traceback__)
+            self.ast.load_root_meson_file()
+            self.ast.parse_project()
+            self.ast.run()
+        except:
+            logger.exception('AST parsing failed')
 
     def get_symbols(self):
         variables = [
             dict(
                 label=k,
                 kind=lsp_const.CompletionItemKind.Variable,
-                documentation="TODO",
+                documentation="TODO (variables)",
                 detail=str(type(v))) for k, v in self.ast.variables.items()
+        ]
+        assignments = [
+            dict(
+                label=k,
+                kind=lsp_const.CompletionItemKind.Variable,
+                documentation=f"TODO (assignments) - evaluates to {str(v)}",
+                detail=str(type(v))) for k, v in self.ast.assign_vals.items()
         ]
         functions = [
             dict(
@@ -59,4 +68,4 @@ class Workspace:
                 documentation="TODO",
                 detail='Function') for k in self.ast.funcs.keys()
         ]
-        return variables + functions
+        return variables + assignments + functions
