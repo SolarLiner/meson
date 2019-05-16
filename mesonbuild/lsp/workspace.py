@@ -1,4 +1,5 @@
 import logging
+import pkgutil
 from pathlib import Path
 from urllib import parse
 from typing import Dict
@@ -10,6 +11,19 @@ from . import lsp_const
 from ..ast.interpreter import AstInterpreter
 
 logger = logging.getLogger(__name__)
+
+KEYWORDS_BLOCK = ["if", "foreach"]
+KEYWORDS_BLOCK_END = [f"end{v}" for v in KEYWORDS_BLOCK]
+KEYWORDS_LOGIC = ["and", "or", "not"]
+KEYWORDS_OTHER = ["else", "elif"]
+KEYWORDS_ALL = KEYWORDS_BLOCK + KEYWORDS_BLOCK_END + KEYWORDS_LOGIC + KEYWORDS_OTHER
+
+MODULES = [
+    dict(
+        name=m.name.replace('unstable_', ''),
+        deprecated=('unstable' in m.name)) for m in pkgutil.iter_modules([(
+            Path(__file__) / '../../modules').resolve()])
+]
 
 
 class Workspace:
@@ -47,6 +61,18 @@ class Workspace:
             logger.exception('AST parsing failed')
 
     def get_symbols(self):
+        keywords = [
+            dict(label=k, kind=lsp_const.CompletionItemKind.Keyword)
+            for k in KEYWORDS_ALL
+        ]
+        modules = [
+            dict(
+                label=k['name'],
+                detail=f"{k['name']} module",
+                deprecated=k['deprecated'],
+                insertText=f"import('{k['name']}')",
+                kind=lsp_const.CompletionItemKind.Module) for k in MODULES
+        ]
         variables = [
             dict(
                 label=k,
@@ -68,4 +94,12 @@ class Workspace:
                 documentation="TODO",
                 detail='Function') for k in self.ast.funcs.keys()
         ]
-        return variables + assignments + functions
+        subdirs = [
+            dict(
+                label=f"{k} (subproject)",
+                kind=lsp_const.CompletionItemKind.Reference,
+                detail=f"subproject('{k}')",
+                insertText=f"subproject('{k}')")
+            for k in self.ast.visited_subdirs.keys()
+        ]
+        return keywords + modules + variables + assignments + functions + subdirs
