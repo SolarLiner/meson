@@ -68,17 +68,19 @@ class MesonLanguageServer(MethodDispatcher):
             dict(
                 text=textDocument.get('text'),
                 version=textDocument.get('version')))
+        self.workspace.build_ast()
 
     def m_text_document__did_close(self, textDocument):
         self.workspace.pop_document(textDocument)
+        self.workspace.build_ast()
 
     def m_text_document__did_change(self, textDocument, contentChanges):
         for change in contentChanges:
             self.workspace.update(textDocument, change)
+        self.workspace.build_ast()
 
     def m_text_document__did_save(self, textDocument):
         self.workspace.documents.get(textDocument.get('uri')).refresh()
-        self.workspace.build_ast()
 
     def m_workspace__did_change_watched_files(self, changes):
         self.workspace.build_ast()
