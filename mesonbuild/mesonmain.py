@@ -26,6 +26,7 @@ from . import mconf, minit, minstall, mintro, msetup, mtest, rewriter, msubproje
 from .mesonlib import MesonException
 from .environment import detect_msys2_arch
 from .wrap import wraptool
+from .lsp import commands as lsp
 
 
 # Note: when adding arguments, please also add them to the completion
@@ -33,56 +34,112 @@ from .wrap import wraptool
 class CommandLineParser:
     def __init__(self):
         self.term_width = shutil.get_terminal_size().columns
-        self.formater = lambda prog: argparse.HelpFormatter(prog, max_help_position=int(self.term_width / 2), width=self.term_width)
+        self.formater = lambda prog: argparse.HelpFormatter(
+            prog,
+            max_help_position=int(self.term_width / 2),
+            width=self.term_width)
 
         self.commands = {}
         self.hidden_commands = []
-        self.parser = argparse.ArgumentParser(prog='meson', formatter_class=self.formater)
-        self.subparsers = self.parser.add_subparsers(title='Commands',
-                                                     description='If no command is specified it defaults to setup command.')
-        self.add_command('setup', msetup.add_arguments, msetup.run,
-                         help_msg='Configure the project')
-        self.add_command('configure', mconf.add_arguments, mconf.run,
-                         help_msg='Change project options',)
-        self.add_command('install', minstall.add_arguments, minstall.run,
-                         help_msg='Install the project')
-        self.add_command('introspect', mintro.add_arguments, mintro.run,
-                         help_msg='Introspect project')
-        self.add_command('init', minit.add_arguments, minit.run,
-                         help_msg='Create a new project')
-        self.add_command('test', mtest.add_arguments, mtest.run,
-                         help_msg='Run tests')
-        self.add_command('wrap', wraptool.add_arguments, wraptool.run,
-                         help_msg='Wrap tools')
-        self.add_command('subprojects', msubprojects.add_arguments, msubprojects.run,
-                         help_msg='Manage subprojects')
-        self.add_command('help', self.add_help_arguments, self.run_help_command,
-                         help_msg='Print help of a subcommand')
-        self.add_command('rewrite', lambda parser: rewriter.add_arguments(parser, self.formater), rewriter.run,
-                         help_msg='Modify the project definition')
+        self.parser = argparse.ArgumentParser(
+            prog='meson', formatter_class=self.formater)
+        self.subparsers = self.parser.add_subparsers(
+            title='Commands',
+            description=
+            'If no command is specified it defaults to setup command.')
+        self.add_command(
+            'setup',
+            msetup.add_arguments,
+            msetup.run,
+            help_msg='Configure the project')
+        self.add_command(
+            'configure',
+            mconf.add_arguments,
+            mconf.run,
+            help_msg='Change project options',
+        )
+        self.add_command(
+            'install',
+            minstall.add_arguments,
+            minstall.run,
+            help_msg='Install the project')
+        self.add_command(
+            'introspect',
+            mintro.add_arguments,
+            mintro.run,
+            help_msg='Introspect project')
+        self.add_command(
+            'init',
+            minit.add_arguments,
+            minit.run,
+            help_msg='Create a new project')
+        self.add_command(
+            'test', mtest.add_arguments, mtest.run, help_msg='Run tests')
+        self.add_command(
+            'wrap',
+            wraptool.add_arguments,
+            wraptool.run,
+            help_msg='Wrap tools')
+        self.add_command(
+            'subprojects',
+            msubprojects.add_arguments,
+            msubprojects.run,
+            help_msg='Manage subprojects')
+        self.add_command(
+            'help',
+            self.add_help_arguments,
+            self.run_help_command,
+            help_msg='Print help of a subcommand')
+        self.add_command(
+            'rewrite',
+            lambda parser: rewriter.add_arguments(parser, self.formater),
+            rewriter.run,
+            help_msg='Modify the project definition')
+        self.add_command(
+            'lsp',
+            lsp.add_arguments,
+            lsp.run,
+            help_msg='Run the Language Server for IDEs')
 
         # Hidden commands
-        self.add_command('runpython', self.add_runpython_arguments, self.run_runpython_command,
-                         help_msg=argparse.SUPPRESS)
-        self.add_command('unstable-coredata', munstable_coredata.add_arguments, munstable_coredata.run,
-                         help_msg=argparse.SUPPRESS)
+        self.add_command(
+            'runpython',
+            self.add_runpython_arguments,
+            self.run_runpython_command,
+            help_msg=argparse.SUPPRESS)
+        self.add_command(
+            'unstable-coredata',
+            munstable_coredata.add_arguments,
+            munstable_coredata.run,
+            help_msg=argparse.SUPPRESS)
 
-    def add_command(self, name, add_arguments_func, run_func, help_msg, aliases=None):
+    def add_command(self,
+                    name,
+                    add_arguments_func,
+                    run_func,
+                    help_msg,
+                    aliases=None):
         aliases = aliases or []
         # FIXME: Cannot have hidden subparser:
         # https://bugs.python.org/issue22848
         if help_msg == argparse.SUPPRESS:
-            p = argparse.ArgumentParser(prog='meson ' + name, formatter_class=self.formater)
+            p = argparse.ArgumentParser(
+                prog='meson ' + name, formatter_class=self.formater)
             self.hidden_commands.append(name)
         else:
-            p = self.subparsers.add_parser(name, help=help_msg, aliases=aliases, formatter_class=self.formater)
+            p = self.subparsers.add_parser(
+                name,
+                help=help_msg,
+                aliases=aliases,
+                formatter_class=self.formater)
         add_arguments_func(p)
         p.set_defaults(run_func=run_func)
         for i in [name] + aliases:
             self.commands[i] = p
 
     def add_runpython_arguments(self, parser):
-        parser.add_argument('-c', action='store_true', dest='eval_arg', default=False)
+        parser.add_argument(
+            '-c', action='store_true', dest='eval_arg', default=False)
         parser.add_argument('script_file')
         parser.add_argument('script_args', nargs=argparse.REMAINDER)
 
@@ -141,14 +198,17 @@ class CommandLineParser:
         finally:
             mlog.shutdown()
 
+
 def run_script_command(script_name, script_args):
     # Map script name to module name for those that doesn't match
-    script_map = {'exe': 'meson_exe',
-                  'install': 'meson_install',
-                  'delsuffix': 'delwithsuffix',
-                  'gtkdoc': 'gtkdochelper',
-                  'hotdoc': 'hotdochelper',
-                  'regencheck': 'regen_checker'}
+    script_map = {
+        'exe': 'meson_exe',
+        'install': 'meson_install',
+        'delsuffix': 'delwithsuffix',
+        'gtkdoc': 'gtkdochelper',
+        'hotdoc': 'hotdochelper',
+        'regencheck': 'regen_checker'
+    }
     module_name = script_map.get(script_name, script_name)
 
     try:
@@ -164,16 +224,20 @@ def run_script_command(script_name, script_args):
         mlog.exception(e)
         return 1
 
+
 def ensure_stdout_accepts_unicode():
-    if sys.stdout.encoding and not sys.stdout.encoding.upper().startswith('UTF-'):
+    if sys.stdout.encoding and not sys.stdout.encoding.upper().startswith(
+            'UTF-'):
         if sys.version_info >= (3, 7):
             sys.stdout.reconfigure(errors='surrogateescape')
         else:
-            sys.stdout = codecs.getwriter('utf-8')(sys.stdout.detach(),
-                                                   errors='surrogateescape')
+            sys.stdout = codecs.getwriter('utf-8')(
+                sys.stdout.detach(), errors='surrogateescape')
             sys.stdout.encoding = 'UTF-8'
             if not hasattr(sys.stdout, 'buffer'):
-                sys.stdout.buffer = sys.stdout.raw if hasattr(sys.stdout, 'raw') else sys.stdout
+                sys.stdout.buffer = sys.stdout.raw if hasattr(
+                    sys.stdout, 'raw') else sys.stdout
+
 
 def run(original_args, mainfile):
     if sys.version_info < (3, 5):
@@ -189,12 +253,18 @@ def run(original_args, mainfile):
 
     # https://github.com/mesonbuild/meson/issues/3653
     if sys.platform.lower() == 'msys':
-        mlog.error('This python3 seems to be msys/python on MSYS2 Windows, which is known to have path semantics incompatible with Meson')
+        mlog.error(
+            'This python3 seems to be msys/python on MSYS2 Windows, which is known to have path semantics incompatible with Meson'
+        )
         msys2_arch = detect_msys2_arch()
         if msys2_arch:
-            mlog.error('Please install and use mingw-w64-i686-python3 and/or mingw-w64-x86_64-python3 with Pacman')
+            mlog.error(
+                'Please install and use mingw-w64-i686-python3 and/or mingw-w64-x86_64-python3 with Pacman'
+            )
         else:
-            mlog.error('Please download and use Python as detailed at: https://mesonbuild.com/Getting-meson.html')
+            mlog.error(
+                'Please download and use Python as detailed at: https://mesonbuild.com/Getting-meson.html'
+            )
         return 2
 
     # Set the meson command that will be used to run scripts and so on
@@ -214,14 +284,16 @@ def run(original_args, mainfile):
 
     return CommandLineParser().run(args)
 
+
 def main():
     # Always resolve the command path so Ninja can find it for regen, tests, etc.
     if 'meson.exe' in sys.executable:
-        assert(os.path.isabs(sys.executable))
+        assert (os.path.isabs(sys.executable))
         launcher = sys.executable
     else:
         launcher = os.path.realpath(sys.argv[0])
     return run(sys.argv[1:], launcher)
+
 
 if __name__ == '__main__':
     sys.exit(main())
