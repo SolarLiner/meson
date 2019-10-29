@@ -15,6 +15,7 @@
 import os
 import json
 import shutil
+import typing
 
 from pathlib import Path
 from .. import mesonlib
@@ -39,14 +40,6 @@ from ..dependencies.base import (
 mod_kwargs = set(['subdir'])
 mod_kwargs.update(known_shmod_kwargs)
 mod_kwargs -= set(['name_prefix', 'name_suffix'])
-
-
-def run_command(python, command):
-    cmd = python.get_command() + ['-c', command]
-    _, stdout, _ = mesonlib.Popen_safe(cmd)
-
-    return stdout.strip()
-
 
 class PythonDependency(ExternalDependency):
 
@@ -122,7 +115,6 @@ class PythonDependency(ExternalDependency):
                     self._find_libpy_windows(environment)
                 else:
                     self._find_libpy(python_holder, environment)
-
                 if self.is_found:
                     mlog.debug('Found "python-{}" via SYSCONFIG module'.format(self.version))
                     py_lookup_method = 'sysconfig'
@@ -130,7 +122,7 @@ class PythonDependency(ExternalDependency):
         if self.is_found:
             mlog.log('Dependency', mlog.bold(self.name), 'found:', mlog.green('YES ({})'.format(py_lookup_method)))
         else:
-            mlog.log('Dependency', mlog.bold(self.name), 'found:', [mlog.red('NO')])
+            mlog.log('Dependency', mlog.bold(self.name), 'found:', mlog.red('NO'))
 
     def _find_libpy(self, python_holder, environment):
         if python_holder.is_pypy:
@@ -152,7 +144,7 @@ class PythonDependency(ExternalDependency):
         if largs is not None:
             self.link_args = largs
 
-        self.is_found = largs is not None or not self.link_libpython
+        self.is_found = largs is not None or self.link_libpython
 
         inc_paths = mesonlib.OrderedSet([
             self.variables.get('INCLUDEPY'),
@@ -211,7 +203,7 @@ class PythonDependency(ExternalDependency):
         if pyarch is None:
             self.is_found = False
             return
-        arch = detect_cpu_family(env.coredata.compilers)
+        arch = detect_cpu_family(env.coredata.compilers.host)
         if arch == 'x86':
             arch = '32'
         elif arch == 'x86_64':
@@ -491,11 +483,15 @@ class PythonModule(ExtensionModule):
         return True
 
     @FeatureNewKwargs('python.find_installation', '0.49.0', ['disabler'])
+    @FeatureNewKwargs('python.find_installation', '0.51.0', ['modules'])
     @disablerIfNotFound
-    @permittedKwargs(['required'])
+    @permittedKwargs({'required', 'modules'})
     def find_installation(self, interpreter, state, args, kwargs):
         feature_check = FeatureNew('Passing "feature" option to find_installation', '0.48.0')
         disabled, required, feature = extract_required_kwarg(kwargs, state.subproject, feature_check)
+        want_modules = mesonlib.extract_as_list(kwargs, 'modules')  # type: typing.List[str]
+        found_modules = []    # type: typing.List[str]
+        missing_modules = []  # type: typing.List[str]
 
         if len(args) > 1:
             raise InvalidArguments('find_installation takes zero or one positional argument.')
@@ -511,7 +507,7 @@ class PythonModule(ExtensionModule):
             return ExternalProgramHolder(NonExistingExternalProgram())
 
         if not name_or_path:
-            python = ExternalProgram('python3', mesonlib.python_command)
+            python = ExternalProgram('python3', mesonlib.python_command, silent=True)
         else:
             python = ExternalProgram.from_entry('python3', name_or_path)
 
@@ -528,26 +524,58 @@ class PythonModule(ExtensionModule):
             if not python.found() and name_or_path in ['python2', 'python3']:
                 python = ExternalProgram('python', silent=True)
 
-            mlog.log('Program', python.name, 'found:',
-                     *[mlog.green('YES'), '({})'.format(' '.join(python.command))] if python.found() else [mlog.red('NO')])
+        if python.found() and want_modules:
+            for mod in want_modules:
+                p, out, err = mesonlib.Popen_safe(
+                    python.command +
+                    ['-c', 'import {0}'.format(mod)])
+                if p.returncode != 0:
+                    missing_modules.append(mod)
+                else:
+                    found_modules.append(mod)
+
+        msg = ['Program', python.name]
+        if want_modules:
+            msg.append('({})'.format(', '.join(want_modules)))
+        msg.append('found:')
+        if python.found() and not missing_modules:
+            msg.extend([mlog.green('YES'), '({})'.format(' '.join(python.command))])
+        else:
+            msg.append(mlog.red('NO'))
+        if found_modules:
+            msg.append('modules:')
+            msg.append(', '.join(found_modules))
+
+        mlog.log(*msg)
 
         if not python.found():
             if required:
                 raise mesonlib.MesonException('{} not found'.format(name_or_path or 'python'))
             res = ExternalProgramHolder(NonExistingExternalProgram())
+        elif missing_modules:
+            if required:
+                raise mesonlib.MesonException('{} is missing modules: {}'.format(name_or_path or 'python', ', '.join(missing_modules)))
+            res = ExternalProgramHolder(NonExistingExternalProgram())
         else:
             # Sanity check, we expect to have something that at least quacks in tune
             try:
-                info = json.loads(run_command(python, INTROSPECT_COMMAND))
+                cmd = python.get_command() + ['-c', INTROSPECT_COMMAND]
+                p, stdout, stderr = mesonlib.Popen_safe(cmd)
+                info = json.loads(stdout)
             except json.JSONDecodeError:
                 info = None
+                mlog.debug('Could not introspect Python (%s): exit code %d' % (str(p.args), p.returncode))
+                mlog.debug('Program stdout:\n')
+                mlog.debug(stdout)
+                mlog.debug('Program stderr:\n')
+                mlog.debug(stderr)
 
             if isinstance(info, dict) and 'version' in info and self._check_version(name_or_path, info['version']):
                 res = PythonInstallation(interpreter, python, info)
             else:
                 res = ExternalProgramHolder(NonExistingExternalProgram())
                 if required:
-                    raise mesonlib.MesonException('{} is not a valid python'.format(python))
+                    raise mesonlib.MesonException('{} is not a valid python or it is missing setuptools'.format(python))
 
         return res
 

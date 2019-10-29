@@ -52,7 +52,7 @@ Like `add_global_arguments` but the arguments are passed to the linker.
 ### add_languages()
 
 ``` meson
-  add_languages(*langs*)
+  bool add_languages(*langs*)
 ```
 
 Add support for new programming languages. Equivalent to having them
@@ -63,6 +63,9 @@ languages that are only used on some platforms like this:
 project('foobar', 'c')
 if compiling_for_osx
   add_languages('objc')
+endif
+if add_languages('cpp', required : false)
+  executable('cpp-app', 'main.cpp')
 endif
 ```
 
@@ -101,7 +104,10 @@ Add a custom test setup that can be used to run the tests with a
 custom setup, for example under Valgrind. The keyword arguments are
 the following:
 
-- `env` an [environment object](#environment-object) to use a custom environment
+- `env` environment variables to set, such as `['NAME1=value1',
+  'NAME2=value2']`, or an [`environment()`
+  object](#environment-object) which allows more sophisticated
+  environment juggling. *Since 0.52.0* a dictionary is also accepted.
 - `exe_wrapper` a list containing the wrapper command or script followed by the arguments to it
 - `gdb` if `true`, the tests are also run under `gdb`
 - `timeout_multiplier` a number to multiply the test timeout with
@@ -109,11 +115,26 @@ the following:
   If `true`, the setup will be used whenever `meson test` is run
   without the `--setup` option. Since 0.49.0
 
-To use the test setup, run `meson test --setup=*name*` inside the build dir.
+To use the test setup, run `meson test --setup=*name*` inside the
+build dir.
 
 Note that all these options are also available while running the
 `meson test` script for running tests instead of `ninja test` or
 `msbuild RUN_TESTS.vcxproj`, etc depending on the backend.
+
+### alias_target
+
+``` meson
+runtarget alias_target(target_name, dep1, ...)
+```
+
+Since *0.52.0*
+
+This function creates a new top-level target. Like all top-level targets, this
+integrates with the selected backend. For instance, with Ninja you can
+run it as `ninja target_name`. This is a dummy target that does not execute any
+command, but ensures that all dependencies are built. Dependencies can be any
+build target (e.g. return value of [executable()](#executable), custom_target(), etc)
 
 ### assert()
 
@@ -134,10 +155,13 @@ run. The behavior of this function is identical to `test` with the
 exception that there is no `is_parallel` keyword, because benchmarks
 are never run in parallel.
 
+*Note:* Prior to 0.52.0 benchmark would warn that `depends` and `proiority`
+were unsupported, this is incorrect
+
 ### both_libraries()
 
 ``` meson
-    buildtarget both_libraries(library_name, list_of_sources, ...)
+    buildtarget = both_libraries(library_name, list_of_sources, ...)
 ```
 
 Builds both a static and shared library with the given
@@ -147,8 +171,8 @@ object files will be reused to build both shared and static libraries,
 unless `b_staticpic` user option or `pic` argument are set to false in
 which case sources will be compiled twice.
 
-The returned [buildtarget](#build-target-object) always represents the shared
-library. In addition it supports the following extra methods:
+The returned [buildtarget](#build-target-object) always represents the
+shared library. In addition it supports the following extra methods:
 
 - `get_shared_lib()` returns the shared library build target
 - `get_static_lib()` returns the static library build target
@@ -197,9 +221,9 @@ Creates an empty configuration object. You should add your
 configuration with [its method calls](#configuration-data-object) and
 finally use it in a call to `configure_file`.
 
-Since *0.49.0* takes an optional dictionary as first argument. If provided, each
-key/value pair is added into the `configuration_data` as if `set()` method was
-called for each of them.
+Since *0.49.0* takes an optional dictionary as first argument. If
+provided, each key/value pair is added into the `configuration_data`
+as if `set()` method was called for each of them.
 
 ### configure_file()
 
@@ -214,8 +238,9 @@ When a [`configuration_data()`](#configuration_data) object is passed
 to the `configuration:` keyword argument, it takes a template file as
 the `input:` (optional) and produces the `output:` (required) by
 substituting values from the configuration data as detailed in [the
-configuration file documentation](Configuration.md). Since *0.49.0* a dictionary
-can be passed instead of a [`configuration_data()`](#configuration_data) object.
+configuration file documentation](Configuration.md). Since *0.49.0* a
+dictionary can be passed instead of a
+[`configuration_data()`](#configuration_data) object.
 
 When a list of strings is passed to the `command:` keyword argument,
 it takes any source or configured file as the `input:` and assumes
@@ -232,9 +257,15 @@ These are all the supported keyword arguments:
   `output`. Available since v0.41.0.
 - `command` as explained above, if specified, Meson does not create
   the file itself but rather runs the specified command, which allows
-  you to do fully custom file generation.
+  you to do fully custom file generation. Since *0.52.0* the command can contain
+  file objects and more than one file can be passed to the `input` keyword
+  argument, see [`custom_target()`](#custom_target) for details about string
+  substitutions.
 - `copy` *(added 0.47.0)* as explained above, if specified Meson only
   copies the file from input to output.
+- `depfile` *(added 0.52.0)* is a dependency file that the command can write listing
+  all the additional files this target depends on. A change
+  in any one of these files triggers a reconfiguration.
 - `format` *(added 0.46.0)* the format of defines. It defaults to `meson`, and so substitutes
 `#mesondefine` statements and variables surrounded by `@` characters, you can also use `cmake`
 to replace `#cmakedefine` statements and variables with the `${variable}` syntax. Finally you can use
@@ -387,10 +418,12 @@ keyword arguments.
 ```
 
 Finds an external dependency (usually a library installed on your
-system) with the given name with `pkg-config` and [with CMake](Dependencies.md#CMake)
-if `pkg-config` fails. Additionally, frameworks (OSX only) and
-[library-specific fallback detection logic](Dependencies.md#dependencies-with-custom-lookup-functionality)
-are also supported. This function supports the following keyword arguments:
+system) with the given name with `pkg-config` and [with
+CMake](Dependencies.md#cmake) if `pkg-config` fails. Additionally,
+frameworks (OSX only) and [library-specific fallback detection
+logic](Dependencies.md#dependencies-with-custom-lookup-functionality)
+are also supported. This function supports the following keyword
+arguments:
 
 - `default_options` *(added 0.37.0)* an array of default option values
   that override those set in the subproject's `meson_options.txt`
@@ -431,6 +464,12 @@ are also supported. This function supports the following keyword arguments:
   You can also specify multiple restrictions by passing a list to this
   keyword argument, such as: `['>=3.14.0', '<=4.1.0']`.
   These requirements are never met if the version is unknown.
+- `include_type` *(added 0.52.0)* is an enum flag, marking how the dependency
+  flags should be converted. Supported values are `'preserve'`, `'system'` and
+  `'non-system'`. System dependencies may be handled differently on some
+   platforms, for instance, using `-isystem` instead of `-I`, where possible.
+   If `include_type` is set to `'preserve'`, no additional conversion will be
+   performed. The default value is `'preserve'`.
 - other
 [library-specific](Dependencies.md#dependencies-with-custom-lookup-functionality)
 keywords may also be accepted (e.g. `modules` specifies submodules to use for
@@ -439,14 +478,15 @@ dependencies such as Qt5 or Boost. )
   [disabler object](#disabler-object) instead of a not-found dependency.
   *Since 0.49.0*
 
-If dependency_name is `''`, the dependency is always not found.  So with
-`required: false`, this always returns a dependency object for which the
-`found()` method returns `false`, and which can be passed like any other
-dependency to the `dependencies:` keyword argument of a `build_target`.  This
-can be used to implement a dependency which is sometimes not required e.g. in
-some branches of a conditional, or with a `fallback:` kwarg, can be used to
-declare an optional dependency that only looks in the specified subproject,
-and only if that's allowed by `--wrap-mode`.
+If dependency_name is `''`, the dependency is always not found.  So
+with `required: false`, this always returns a dependency object for
+which the `found()` method returns `false`, and which can be passed
+like any other dependency to the `dependencies:` keyword argument of a
+`build_target`.  This can be used to implement a dependency which is
+sometimes not required e.g. in some branches of a conditional, or with
+a `fallback:` kwarg, can be used to declare an optional dependency
+that only looks in the specified subproject, and only if that's
+allowed by `--wrap-mode`.
 
 The returned object also has methods that are documented in the
 [object methods section](#dependency-object) below.
@@ -466,11 +506,15 @@ Print the argument string and halts the build process.
 ### environment()
 
 ``` meson
-    environment_object environment()
+    environment_object environment(...)
 ```
 
-Returns an empty [environment variable object](#environment-object). Added in
-0.35.0.
+Returns an empty [environment variable
+object](#environment-object). Added in 0.35.0.
+
+Since *0.52.0* takes an optional dictionary as first argument. If
+provided, each key/value pair is added into the `environment_object`
+as if `set()` method was called for each of them.
 
 ### executable()
 
@@ -564,15 +608,15 @@ be passed to [shared and static libraries](#library).
 - `include_directories` one or more objects created with the
   `include_directories` function, or, since 0.50.0, strings, which
   will be transparently expanded to include directory objects
-- `install`, when set to true, this executable should be installed
+- `install`, when set to true, this executable should be installed, defaults to `false`
 - `install_dir` override install directory for this file. The value is
   relative to the `prefix` specified. F.ex, if you want to install
   plugins into a subdir, you'd use something like this: `install_dir :
-  join_paths(get_option('libdir'), 'projectname-1.0'`).
+  get_option('libdir') / 'projectname-1.0'`.
 - `install_mode` *(added 0.47.0)* specify the file mode in symbolic format
   and optionally the owner/uid and group/gid for the installed files.
 - `install_rpath` a string to set the target's rpath to after install
-  (but *not* before that)
+  (but *not* before that). On Windows, this argument has no effect.
 - `objects` list of prebuilt object files (usually for third party
   products you don't have source to) that should be linked in this
   target, **never** use this for object files that you build yourself.
@@ -649,6 +693,14 @@ Keyword arguments are the following:
   [disabler object](#disabler-object) instead of a not-found object.
   *Since 0.49.0*
 
+- `version` *(since 0.52.0)* Specifies the required version, see
+  [`dependency()`](#dependency) for argument format. The version of the program
+  is determined by running `program_name --version` command. If stdout is empty
+  it fallbacks to stderr. If the output contains more text than simply a version
+  number, only the first occurence of numbers separated by dots is kept.
+  If the output is more complicated than that, the version checking will have to
+  be done manually using [`run_command()`](#run_command).
+
 Meson will also autodetect scripts with a shebang line and run them
 with the executable/interpreter specified in it both on Windows
 (because the command invocator will reject the command otherwise) and
@@ -657,14 +709,16 @@ set). Hence, you *must not* manually add the interpreter while using
 this script as part of a list of commands.
 
 If you need to check for a program in a non-standard location, you can
-just pass an absolute path to `find_program`, e.g.  ``` setcap =
-find_program('setcap', '/usr/sbin/setcap', '/sbin/setcap', required :
-false) ```
+just pass an absolute path to `find_program`, e.g.
+
+```meson
+setcap = find_program('setcap', '/usr/sbin/setcap', '/sbin/setcap', required : false)
+```
 
 It is also possible to pass an array to `find_program` in case you
 need to construct the set of paths to search on the fly:
 
-```
+```meson
 setcap = find_program(['setcap', '/usr/sbin/setcap', '/sbin/setcap'], required : false)
 ```
 
@@ -714,6 +768,9 @@ following:
 
 - `arguments` a list of template strings that will be the command line
   arguments passed to the executable
+- `depends` is an array of build targets that must be built before this
+  generator can be run. This is used if you have a generator that calls
+  a second executable that is built in this project. Available since 0.51.0
 - `depfile` is a template string pointing to a dependency file that a
   generator can write listing all the additional files this target
   depends on, for example a C compiler would list all the header files
@@ -777,8 +834,7 @@ The only exceptions are: `sysconfdir`, `localstatedir`, and
 configuration as-is, which may be absolute, or relative to `prefix`.
 [`install_dir` arguments](Installing.md) handles that as expected, but
 if you need the absolute path to one of these e.g. to use in a define
-etc., you should use `join_paths(get_option('prefix'),
-get_option('localstatedir'))`
+etc., you should use `get_option('prefix') / get_option('localstatedir')`
 
 For options of type `feature` a special object is returned instead of
 a string.  See [`feature` options](Build-options.md#features)
@@ -1029,6 +1085,14 @@ share/
   file1
 ```
 
+### is_disabler()
+
+``` meson
+    bool is_disabler(var)
+```
+
+Returns true if a variable is a disabler and false otherwise. Added in 0.52.0.
+
 ### is_variable()
 
 ``` meson
@@ -1080,13 +1144,16 @@ res2 = foo / bar
 ```
 
 Builds a library that is either static, shared or both depending on
-the value of `default_library` 
+the value of `default_library`
 user [option](https://mesonbuild.com/Builtin-options.html).
 You should use this instead of [`shared_library`](#shared_library),
 [`static_library`](#static_library) or
 [`both_libraries`](#both_libraries) most of the time. This allows you
 to toggle your entire project (including subprojects) from shared to
-static with only one option.
+static with only one option. This option applies to libraries being
+built internal to the entire project. For external dependencies, the
+default library type prefered is shared. This can be adapted on a per
+library basis using the [dependency()](#dependency)) `static` keyword.
 
 The keyword arguments for this are the same as for
 [`executable`](#executable) with the following additions:
@@ -1142,8 +1209,8 @@ The first argument to this function must be a string defining the name
 of this project. It is followed by programming languages that the
 project uses. Supported values for languages are `c`, `cpp` (for
 `C++`), `d`, `objc`, `objcpp`, `fortran`, `java`, `cs` (for `C#`),
-`vala` and `rust`. In versions before `0.40.0` you must have at least one
-language listed.
+`vala` and `rust`. Since version `0.40.0` the list of languages
+is optional.
 
 The project name can be any string you want, it's not used for
 anything except descriptive purposes. However since it is written to
@@ -1213,7 +1280,10 @@ This function supports the following keyword arguments:
    be checked, and the configuration will fail if it is non-zero. The default is
    `false`.
    Since 0.47.0
- - `env` an [environment object](#environment-object) to use a custom environment
+ - `env` environment variables to set, such as `['NAME1=value1',
+   'NAME2=value2']`, or an [`environment()`
+   object](#environment-object) which allows more sophisticated
+   environment juggling. *Since 0.52.0* a dictionary is also accepted.
    Since 0.50.0
 
 See also [External commands](External-commands.md).
@@ -1309,6 +1379,13 @@ If you want the shared module to be able to refer to functions and
 variables defined in the [`executable`](#executable) it is loaded by,
 you will need to set the `export_dynamic` argument of the executable to
 `true`.
+
+Supports the following extra keyword arguments:
+
+- `vs_module_defs`, *(Added 0.52.0)*, a string, a File object, or
+  Custom Target for a Microsoft module definition file for controlling
+  symbol exports, etc., on platforms where that is possible
+  (e.g. Windows).
 
 **Note:** Linking to a shared module is not supported on some
 platforms, notably OSX.  Consider using a
@@ -1439,7 +1516,7 @@ Keyword arguments are the following:
 - `env` environment variables to set, such as `['NAME1=value1',
   'NAME2=value2']`, or an [`environment()`
   object](#environment-object) which allows more sophisticated
-  environment juggling
+  environment juggling. *Since 0.52.0* a dictionary is also accepted.
 
 - `is_parallel` when false, specifies that no other test must be
   running at the same time as this test
@@ -1472,6 +1549,12 @@ Keyword arguments are the following:
   to record the outcome of the test) or `tap` ([Test Anything
   Protocol](https://www.testanything.org/)). For more on the Meson test
   harness protocol read [Unit Tests](Unit-tests.md). Since 0.50.0
+
+- `priority` specifies the priority of a test. Tests with a
+  higher priority are *started* before tests with a lower priority.
+  The starting order of tests with identical priorities is
+  implementation-defined. The default priority is 0, negative numbers are
+  permitted. Since 0.52.0
 
 Defined tests can be run in a backend-agnostic way by calling
 `meson test` inside the build dir, or by using backend-specific
@@ -1707,6 +1790,109 @@ Note that while cross-compiling, it simply returns the values defined
 in the cross-info file. If `target_machine` values are not defined in
 the cross-info file, `host_machine` values are returned instead.
 
+### `string` object
+
+All [strings](Syntax.md#strings) have the following methods. Strings
+are immutable, all operations return their results as a new string.
+
+- `contains(string)` returns true if string contains the string
+  specified as the argument
+
+- `endswith(string)` returns true if string ends with the string
+  specified as the argument
+
+- `format()` formats text, see the [Syntax
+  manual](Syntax.md#string-formatting) for usage info
+
+- `join(list_of_strings)` is the opposite of split, for example
+  `'.'.join(['a', 'b', 'c']` yields `'a.b.c'`
+
+- `split(split_character)` splits the string at the specified
+  character (or whitespace if not set) and returns the parts in an
+  array
+
+- `startswith(string)` returns true if string starts with the string
+  specified as the argument
+
+- `strip()` removes whitespace at the beginning and end of the string
+  *(added 0.43.0)* optionally can take one positional string argument,
+  and all characters in that string will be stripped
+
+- `to_int` returns the string converted to an integer (error if string
+  is not a number)
+
+- `to_lower()` creates a lower case version of the string
+
+- `to_upper()` creates an upper case version of the string
+
+- `underscorify()` creates a string where every non-alphabetical
+  non-number character is replaced with `_`
+
+- `version_compare(comparison_string)` does semantic version
+  comparison, if `x = '1.2.3'` then `x.version_compare('>1.0.0')`
+  returns `true`
+
+### `Number` object
+
+[Numbers](Syntax.md#numbers) support these methods:
+
+ - `is_even()` returns true if the number is even
+ - `is_odd()` returns true if the number is odd
+ - `to_string()` returns the value of the number as a string.
+
+### `boolean` object
+
+A [boolean](Syntax.md#booleans) object has two simple methods:
+
+- `to_int()` as above, but returns either `1` or `0`
+
+- `to_string()` returns the string `'true'` if the boolean is true or
+  `'false'` otherwise. You can also pass it two strings as positional
+  arguments to specify what to return for true/false. For instance,
+  `bool.to_string('yes', 'no')` will return `yes` if the boolean is
+  true and `no` if it is false.
+
+### `array` object
+
+The following methods are defined for all [arrays](Syntax.md#arrays):
+
+- `contains(item)`, returns `true` if the array contains the object
+  given as argument, `false` otherwise
+
+- `get(index, fallback)`, returns the object at the given index,
+  negative indices count from the back of the array, indexing out of
+  bounds returns the `fallback` value *(added 0.38.0)* or, if it is
+  not specified, causes a fatal error
+
+- `length()`, the size of the array
+
+You can also iterate over arrays with the [`foreach`
+statement](Syntax.md#foreach-statements).
+
+### `dictionary` object
+
+The following methods are defined for all [dictionaries](Syntax.md#dictionaries):
+
+- `has_key(key)` returns `true` if the dictionary contains the key
+  given as argument, `false` otherwise
+
+- `get(key, fallback)`, returns the value for the key given as first
+  argument if it is present in the dictionary, or the optional
+  fallback value given as the second argument. If a single argument
+  was given and the key was not found, causes a fatal error
+
+You can also iterate over dictionaries with the [`foreach`
+statement](Syntax.md#foreach-statements).
+
+Dictionaries are available since 0.47.0.
+
+Since 0.48.0 dictionaries can be added (e.g. `d1 = d2 + d3` and `d1 += d2`).
+Values from the second dictionary overrides values from the first.
+
+## Returned objects
+
+These are objects returned by the [functions listed above](#functions).
+
 ### `compiler` object
 
 This object is returned by
@@ -1932,108 +2118,6 @@ However, with GCC, these variables will be ignored when
 cross-compiling. In that case you need to use a specs file. See:
 <http://www.mingw.org/wiki/SpecsFileHOWTO>
 
-### `string` object
-
-All [strings](Syntax.md#strings) have the following methods. Strings
-are immutable, all operations return their results as a new string.
-
-- `contains(string)` returns true if string contains the string
-  specified as the argument
-
-- `endswith(string)` returns true if string ends with the string
-  specified as the argument
-
-- `format()` formats text, see the [Syntax
-  manual](Syntax.md#string-formatting) for usage info
-
-- `join(list_of_strings)` is the opposite of split, for example
-  `'.'.join(['a', 'b', 'c']` yields `'a.b.c'`
-
-- `split(split_character)` splits the string at the specified
-  character (or whitespace if not set) and returns the parts in an
-  array
-
-- `startswith(string)` returns true if string starts with the string
-  specified as the argument
-
-- `strip()` removes whitespace at the beginning and end of the string
-  *(added 0.43.0)* optionally can take one positional string argument,
-  and all characters in that string will be stripped
-
-- `to_int` returns the string converted to an integer (error if string
-  is not a number)
-
-- `to_lower()` creates a lower case version of the string
-
-- `to_upper()` creates an upper case version of the string
-
-- `underscorify()` creates a string where every non-alphabetical
-  non-number character is replaced with `_`
-
-- `version_compare(comparison_string)` does semantic version
-  comparison, if `x = '1.2.3'` then `x.version_compare('>1.0.0')`
-  returns `true`
-
-### `Number` object
-
-[Numbers](Syntax.md#numbers) support these methods:
-
- - `is_even()` returns true if the number is even
- - `is_odd()` returns true if the number is odd
-
-### `boolean` object
-
-A [boolean](Syntax.md#booleans) object has two simple methods:
-
-- `to_int()` as above, but returns either `1` or `0`
-
-- `to_string()` returns the string `'true'` if the boolean is true or
-  `'false'` otherwise. You can also pass it two strings as positional
-  arguments to specify what to return for true/false. For instance,
-  `bool.to_string('yes', 'no')` will return `yes` if the boolean is
-  true and `no` if it is false.
-
-### `array` object
-
-The following methods are defined for all [arrays](Syntax.md#arrays):
-
-- `contains(item)`, returns `true` if the array contains the object
-  given as argument, `false` otherwise
-
-- `get(index, fallback)`, returns the object at the given index,
-  negative indices count from the back of the array, indexing out of
-  bounds returns the `fallback` value *(added 0.38.0)* or, if it is
-  not specified, causes a fatal error
-
-- `length()`, the size of the array
-
-You can also iterate over arrays with the [`foreach`
-statement](Syntax.md#foreach-statements).
-
-### `dictionary` object
-
-The following methods are defined for all [dictionaries](Syntax.md#dictionaries):
-
-- `has_key(key)` returns `true` if the dictionary contains the key
-  given as argument, `false` otherwise
-
-- `get(key, fallback)`, returns the value for the key given as first
-  argument if it is present in the dictionary, or the optional
-  fallback value given as the second argument. If a single argument
-  was given and the key was not found, causes a fatal error
-
-You can also iterate over dictionaries with the [`foreach`
-statement](Syntax.md#foreach-statements).
-
-Dictionaries are available since 0.47.0.
-
-Since 0.48.0 dictionaries can be added (e.g. `d1 = d2 + d3` and `d1 += d2`).
-Values from the second dictionary overrides values from the first.
-
-## Returned objects
-
-These are objects returned by the [functions listed above](#functions).
-
 ### `build target` object
 
 A build target is either an [executable](#executable),
@@ -2154,6 +2238,12 @@ an external dependency with the following methods:
    `unknown` if the dependency provider doesn't support determining the
    version.
 
+ - `include_type()` returns whether the value set by the `include_type` kwarg
+
+ - `as_system(value)` returns a copy of the dependency object, which has changed
+   the value of `include_type` to `value`. The `value` argument is optional and
+   defaults to `'preserve'`.
+
  - `partial_dependency(compile_args : false, link_args : false, links
    : false, includes : false, source : false)` *(Added 0.46.0)* returns
    a new dependency object with the same name, version, found status,
@@ -2173,7 +2263,7 @@ an external dependency with the following methods:
    dep3 will add `['-Werror=foo', '-Werror=bar']` to the compiler args
    of any target it is added to, but libfoo will not be added to the
    link_args.
-   
+
    *Note*: A bug present until 0.50.1 results in the above behavior
    not working correctly.
 
@@ -2184,6 +2274,15 @@ an external dependency with the following methods:
    - links: anything passed via link_with or link_whole
    - includes: any include_directories
    - sources: any compiled or static sources the dependency has
+
+ - `get_variable(cmake : str, pkgconfig : str, configtool : str,
+   default_value : str, pkgconfig_define : [str, str])` *(Added in
+   0.51.0)* A generic variable getter method, which repalces the
+   get_*type*_variable methods. This allows one to get the variable
+   from a dependency without knowing specifically how that dependency
+   was found. If default_value is set and the value cannot be gotten
+   from the object then default_value is returned, if it is not set
+   then an error is raised.
 
 ### `disabler` object
 
@@ -2205,7 +2304,7 @@ and has the following methods:
 
 - `path()` which returns a string pointing to the script or executable
   **NOTE:** You should not need to use this method. Passing the object
-  itself should work in all cases. F.ex.: `run_command(obj, arg1, arg2)`
+  itself should work in all cases. For example: `run_command(obj, arg1, arg2)`
 
 ### `environment` object
 
@@ -2222,8 +2321,8 @@ tests and other functions. It has the following methods.
   separator for the host operating system will be used, i.e. ';' for
   Windows and ':' for UNIX/POSIX systems.
 
-- `prepend(varname, value1, value2, ...)` is the same as `append` except that it
-  writes to the beginning of the variable
+- `prepend(varname, value1, value2, ...)` is the same as `append`
+  except that it writes to the beginning of the variable
 
 - `set(varname, value1, value2)` sets the environment variable
   specified in the first argument to the values in the second argument
@@ -2278,9 +2377,14 @@ opaque object representing it.
 - `found()` *(added 0.48.0)* which returns whether the subproject was
   successfully setup
 
-- `get_variable(name)` fetches the specified variable from inside the
-  subproject. This is useful to, for instance, get a [declared
-  dependency](#declare_dependency) from the [subproject](Subprojects.md).
+- `get_variable(name, fallback)` fetches the specified variable from
+  inside the subproject. This is useful to, for instance, get a
+  [declared dependency](#declare_dependency) from the
+  [subproject](Subprojects.md).
+
+  If the variable does not exist, the variable `fallback` is returned.
+  If a fallback is not specified, then attempting to read a non-existing
+  variable will cause a fatal error.
 
 ### `run result` object
 

@@ -337,20 +337,25 @@ class Disabler(InterpreterObject):
     def found_method(self, args, kwargs):
         return False
 
-def is_disabler(i):
+def is_disabler(i) -> bool:
     return isinstance(i, Disabler)
 
-def is_disabled(args, kwargs):
+def is_arg_disabled(arg) -> bool:
+    if is_disabler(arg):
+        return True
+    if isinstance(arg, list):
+        for i in arg:
+            if is_arg_disabled(i):
+                return True
+    return False
+
+def is_disabled(args, kwargs) -> bool:
     for i in args:
-        if isinstance(i, Disabler):
+        if is_arg_disabled(i):
             return True
     for i in kwargs.values():
-        if isinstance(i, Disabler):
+        if is_arg_disabled(i):
             return True
-        if isinstance(i, list):
-            for j in i:
-                if isinstance(j, Disabler):
-                    return True
     return False
 
 class InterpreterBase:
@@ -378,7 +383,7 @@ class InterpreterBase:
         try:
             self.ast = mparser.Parser(code, self.subdir).parse()
         except mesonlib.MesonException as me:
-            me.file = environment.build_filename
+            me.file = mesonfile
             raise me
 
     def join_path_strings(self, args):
@@ -495,6 +500,8 @@ class InterpreterBase:
 
     def evaluate_notstatement(self, cur):
         v = self.evaluate_statement(cur.value)
+        if is_disabler(v):
+            return v
         if not isinstance(v, bool):
             raise InterpreterException('Argument to "not" is not a boolean.')
         return not v
@@ -675,8 +682,6 @@ The result of this is undefined and will become a hard error in a future Meson r
             if len(node.varnames) != 1:
                 raise InvalidArguments('Foreach on array does not unpack')
             varname = node.varnames[0].value
-            if is_disabler(items):
-                return items
             for item in items:
                 self.set_variable(varname, item)
                 try:
@@ -688,8 +693,6 @@ The result of this is undefined and will become a hard error in a future Meson r
         elif isinstance(items, dict):
             if len(node.varnames) != 2:
                 raise InvalidArguments('Foreach on dict unpacks key and value')
-            if is_disabler(items):
-                return items
             for key, value in items.items():
                 self.set_variable(node.varnames[0].value, key)
                 self.set_variable(node.varnames[1].value, value)
@@ -762,7 +765,7 @@ The result of this is undefined and will become a hard error in a future Meson r
     def function_call(self, node):
         func_name = node.func_name
         (posargs, kwargs) = self.reduce_arguments(node.args)
-        if is_disabled(posargs, kwargs):
+        if is_disabled(posargs, kwargs) and func_name != 'set_variable' and func_name != 'is_disabler':
             return Disabler()
         if func_name in self.funcs:
             func = self.funcs[func_name]
@@ -800,8 +803,11 @@ The result of this is undefined and will become a hard error in a future Meson r
         (args, kwargs) = self.reduce_arguments(args)
         # Special case. This is the only thing you can do with a disabler
         # object. Every other use immediately returns the disabler object.
-        if isinstance(obj, Disabler) and method_name == 'found':
-            return False
+        if isinstance(obj, Disabler):
+            if method_name == 'found':
+                return False
+            else:
+                return Disabler()
         if is_disabled(args, kwargs):
             return Disabler()
         if method_name == 'extract_objects':

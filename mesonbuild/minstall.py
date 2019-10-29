@@ -157,7 +157,7 @@ def restore_selinux_contexts():
     '''
     try:
         subprocess.check_call(['selinuxenabled'])
-    except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
+    except (FileNotFoundError, NotADirectoryError, PermissionError, subprocess.CalledProcessError):
         # If we don't have selinux or selinuxenabled returned 1, failure
         # is ignored quietly.
         return
@@ -324,7 +324,6 @@ class Installer:
                 # FIXME: what about symlinks?
                 self.do_copyfile(abs_src, abs_dst)
                 set_mode(abs_dst, install_mode, data.install_umask)
-                append_to_log(self.lf, abs_dst)
 
     def do_install(self, datafilename):
         with open(datafilename, 'rb') as ifile:
@@ -453,18 +452,20 @@ class Installer:
                     if fname.endswith('.jar'):
                         print('Not stripping jar target:', os.path.basename(fname))
                         continue
-                    print('Stripping target {!r}'.format(fname))
+                    print('Stripping target {!r} using {}.'.format(fname, d.strip_bin[0]))
                     ps, stdo, stde = Popen_safe(d.strip_bin + [outname])
                     if ps.returncode != 0:
                         print('Could not strip file.\n')
                         print('Stdout:\n%s\n' % stdo)
                         print('Stderr:\n%s\n' % stde)
                         sys.exit(1)
-                pdb_filename = os.path.splitext(fname)[0] + '.pdb'
-                if not should_strip and os.path.exists(pdb_filename):
-                    pdb_outname = os.path.splitext(outname)[0] + '.pdb'
-                    self.do_copyfile(pdb_filename, pdb_outname)
-                    set_mode(pdb_outname, install_mode, d.install_umask)
+                if fname.endswith('.js'):
+                    # Emscripten outputs js files and optionally a wasm file.
+                    # If one was generated, install it as well.
+                    wasm_source = os.path.splitext(fname)[0] + '.wasm'
+                    if os.path.exists(wasm_source):
+                        wasm_output = os.path.splitext(outname)[0] + '.wasm'
+                        self.do_copyfile(wasm_source, wasm_output)
             elif os.path.isdir(fname):
                 fname = os.path.join(d.build_dir, fname.rstrip('/'))
                 outname = os.path.join(outdir, os.path.basename(fname))

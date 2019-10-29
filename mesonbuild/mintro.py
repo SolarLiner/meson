@@ -123,6 +123,8 @@ def list_installed(installdata):
             res[path] = os.path.join(installdata.prefix, installdir, os.path.basename(path))
         for path, installpath, _ in installdata.man:
             res[path] = os.path.join(installdata.prefix, installpath)
+        for path, installpath, _, _ in installdata.install_subdirs:
+            res[path] = os.path.join(installdata.prefix, installpath)
     return res
 
 def list_targets_from_source(intr: IntrospectionInterpreter):
@@ -227,21 +229,33 @@ def list_buildoptions(coredata: cdata.CoreData) -> List[dict]:
     core_options = {k: o for k, o in coredata.builtins.items() if k in core_option_names}
 
     add_keys(optlist, core_options, 'core')
+    add_keys(optlist, coredata.builtins_per_machine.host, 'core', machine='host')
+    add_keys(
+        optlist,
+        {'build.' + k: o for k, o in coredata.builtins_per_machine.build.items()},
+        'core',
+        machine='build',
+    )
     add_keys(optlist, coredata.backend_options, 'backend')
     add_keys(optlist, coredata.base_options, 'base')
-    # TODO others
-    add_keys(optlist, coredata.compiler_options.build, 'compiler')
+    add_keys(optlist, coredata.compiler_options.host, 'compiler', machine='host')
+    add_keys(
+        optlist,
+        {'build.' + k: o for k, o in coredata.compiler_options.build.items()},
+        'compiler',
+        machine='build',
+    )
     add_keys(optlist, dir_options, 'directory')
     add_keys(optlist, coredata.user_options, 'user')
     add_keys(optlist, test_options, 'test')
     return optlist
 
-def add_keys(optlist, options: Dict[str, cdata.UserOption], section):
+def add_keys(optlist, options: Dict[str, cdata.UserOption], section: str, machine: str = 'any'):
     keys = list(options.keys())
     keys.sort()
     for key in keys:
         opt = options[key]
-        optdict = {'name': key, 'value': opt.value, 'section': section}
+        optdict = {'name': key, 'value': opt.value, 'section': section, 'machine': machine}
         if isinstance(opt, cdata.UserStringOption):
             typestr = 'string'
         elif isinstance(opt, cdata.UserBooleanOption):
@@ -282,7 +296,7 @@ def list_deps_from_source(intr: IntrospectionInterpreter):
 
 def list_deps(coredata: cdata.CoreData):
     result = []
-    for d in coredata.deps.values():
+    for d in coredata.deps.host.values():
         if d.found():
             result += [{'name': d.name,
                         'compile_args': d.get_compile_args(),
@@ -299,7 +313,7 @@ def get_test_list(testdata):
             fname = t.fname
         to['cmd'] = fname + t.cmd_args
         if isinstance(t.env, build.EnvironmentVariables):
-            to['env'] = t.env.get_env(os.environ)
+            to['env'] = t.env.get_env({})
         else:
             to['env'] = t.env
         to['name'] = t.name
@@ -307,6 +321,7 @@ def get_test_list(testdata):
         to['timeout'] = t.timeout
         to['suite'] = t.suite
         to['is_parallel'] = t.is_parallel
+        to['priority'] = t.priority
         result.append(to)
     return result
 
@@ -383,9 +398,9 @@ def run(options):
 
     infofile = get_meson_info_file(infodir)
     if not os.path.isdir(datadir) or not os.path.isdir(infodir) or not os.path.isfile(infofile):
-        print('Current directory is not a meson build directory.'
-              'Please specify a valid build dir or change the working directory to it.'
-              'It is also possible that the build directory was generated with an old'
+        print('Current directory is not a meson build directory.\n'
+              'Please specify a valid build dir or change the working directory to it.\n'
+              'It is also possible that the build directory was generated with an old\n'
               'meson version. Please regenerate it in this case.')
         return 1
 

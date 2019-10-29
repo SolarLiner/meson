@@ -51,6 +51,21 @@ By default Meson uses as many concurrent processes as there are cores on the tes
 $ MESON_TESTTHREADS=5 ninja test
 ```
 
+Priorities
+--
+
+*(added in version 0.52.0)*
+
+Tests can be assigned a priority that determines when a test is *started*. Tests with higher priority are started first, tests with lower priority started later. The default priority is 0, meson makes no guarantee on the ordering of tests with identical priority.
+
+```meson
+test('started second', t, priority : 0)
+test('started third', t, priority : -50)
+test('started first', t, priority : 1000)
+```
+
+Note that the test priority only affects the starting order of tests and subsequent tests are affected by how long it takes previous tests to complete. It is thus possible that a higher-priority test is still running when lower-priority tests with a shorter runtime have completed.
+
 ## Skipped tests and hard errors
 
 Sometimes a test can only determine at runtime that it can not be run.
@@ -71,10 +86,23 @@ The simplest thing to do is just to run all tests, which is equivalent to runnin
 $ meson test
 ```
 
-You can also run only a single test by giving its name:
+### Run subsets of tests
+
+For clarity, consider the meson.build containing:
+
+```meson
+
+test('A', ..., suite: 'foo')
+test('B', ..., suite: 'foo')
+test('C', ..., suite: 'bar')
+test('D', ..., suite: 'baz')
+
+```
+
+Specify test(s) by name like:
 
 ```console
-$ meson test testname
+$ meson test A D
 ```
 
 Tests belonging to a suite `suite` can be run as follows
@@ -84,6 +112,18 @@ $ meson test --suite (sub)project_name:suite
 ```
 
 Since version *0.46*, `(sub)project_name` can be omitted if it is the top-level project.
+
+Multiple suites are specified like:
+
+```console
+$ meson test --suite foo --suite bar
+```
+
+NOTE: If you choose to specify both suite(s) and specific test name(s), the
+test name(s) must be contained in the suite(s). This however is redundant--
+it would be more useful to specify either specific test names or suite(s).
+
+### Other test options
 
 Sometimes you need to run the tests multiple times, which is done like this:
 
@@ -119,6 +159,12 @@ $ meson test --gdb --repeat=10000 testname
 
 This runs the test up to 10 000 times under GDB automatically. If the program crashes, GDB will halt and the user can debug the application. Note that testing timeouts are disabled in this case so `meson test` will not kill `gdb` while the developer is still debugging it. The downside is that if the test binary freezes, the test runner will wait forever.
 
+Sometimes, the GDB binary is not in the PATH variable or the user wants to use a GDB replacement. Therefore, the invoked GDB program can be specified *(added 0.52.0)*:
+
+```console
+$ meson test --gdb --gdb-path /path/to/gdb testname
+```
+
 ```console
 $ meson test --print-errorlogs
 ```
@@ -127,4 +173,8 @@ Meson will report the output produced by the failing tests along with other usef
 
 For further information see the command line help of Meson by running `meson test -h`.
 
-**NOTE:** If `meson test` does not work for you, you likely have a old version of Meson. In that case you should call `mesontest` instead. If `mesontest` doesn't work either you have a very old version prior to 0.37.0 and should upgrade.
+## Legacy notes
+
+If `meson test` does not work for you, you likely have a old version of Meson.
+In that case you should call `mesontest` instead. If `mesontest` doesn't work
+either you have a very old version prior to 0.37.0 and should upgrade.

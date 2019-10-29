@@ -15,8 +15,8 @@
 import shutil
 
 from os import path
-from .. import coredata, mesonlib, build
-from ..mesonlib import MesonException
+from .. import coredata, mesonlib, build, mlog
+from ..mesonlib import MesonException, run_once
 from . import ModuleReturnValue
 from . import ExtensionModule
 from ..interpreterbase import permittedKwargs, FeatureNew, FeatureNewKwargs
@@ -55,7 +55,14 @@ PRESET_ARGS = {
     ]
 }
 
+
 class I18nModule(ExtensionModule):
+
+    @staticmethod
+    @run_once
+    def nogettext_warning():
+        mlog.warning('Gettext not found, all translation targets will be ignored.')
+        return ModuleReturnValue(None, [])
 
     @staticmethod
     def _get_data_dirs(state, dirs):
@@ -67,6 +74,8 @@ class I18nModule(ExtensionModule):
     @FeatureNewKwargs('i18n.merge_file', '0.51.0', ['args'])
     @permittedKwargs(build.CustomTarget.known_kwargs | {'data_dirs', 'po_dir', 'type', 'args'})
     def merge_file(self, state, args, kwargs):
+        if not shutil.which('xgettext'):
+            return self.nogettext_warning()
         podir = kwargs.pop('po_dir', None)
         if not podir:
             raise MesonException('i18n: po_dir is a required kwarg')
@@ -120,7 +129,7 @@ class I18nModule(ExtensionModule):
         if len(args) != 1:
             raise coredata.MesonException('Gettext requires one positional argument (package name).')
         if not shutil.which('xgettext'):
-            raise coredata.MesonException('Can not do gettext because xgettext is not installed.')
+            return self.nogettext_warning()
         packagename = args[0]
         languages = mesonlib.stringlistify(kwargs.get('languages', []))
         datadirs = self._get_data_dirs(state, mesonlib.stringlistify(kwargs.get('data_dirs', [])))

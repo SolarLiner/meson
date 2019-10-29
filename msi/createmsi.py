@@ -43,20 +43,17 @@ class PackageGenerator:
         self.main_xml = 'meson.wxs'
         self.main_o = 'meson.wixobj'
         self.bytesize = 32 if '32' in platform.architecture()[0] else 64
-        # rely on the environment variable since python architecture may not be the same as system architecture
-        if 'PROGRAMFILES(X86)' in os.environ:
-            self.bytesize = 64
         self.final_output = 'meson-%s-%d.msi' % (self.version, self.bytesize)
         self.staging_dirs = ['dist', 'dist2']
         if self.bytesize == 64:
             self.progfile_dir = 'ProgramFiles64Folder'
-            redist_glob = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\2017\\Community\\VC\\Redist\\MSVC\\*\\MergeModules\\Microsoft_VC141_CRT_x64.msm'
+            redist_glob = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Community\\VC\\Redist\\MSVC\\*\\MergeModules\\Microsoft_VC142_CRT_x64.msm'
         else:
             self.progfile_dir = 'ProgramFilesFolder'
-            redist_glob = 'C:\\Program Files\\Microsoft Visual Studio\\2017\\Community\\VC\\Redist\\MSVC\\*\\MergeModules\\Microsoft_VC141_CRT_x86.msm'
+            redist_glob = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Community\\VC\\Redist\\MSVC\\*\\MergeModules\\Microsoft_VC142_CRT_x86.msm'
         trials = glob(redist_glob)
         if len(trials) != 1:
-            sys.exit('There are more than one potential redist dirs.')
+            sys.exit('Could not find unique MSM setup.')
         self.redist_path = trials[0]
         self.component_num = 0
         self.feature_properties = {
@@ -114,20 +111,24 @@ class PackageGenerator:
         modules = self.get_all_modules_from_dir('mesonbuild/modules')
         modules += self.get_all_modules_from_dir('mesonbuild/scripts')
         modules += self.get_more_modules()
-        modulestr = ','.join(modules)
-        python = shutil.which('python')
-        cxfreeze = os.path.join(os.path.dirname(python), "Scripts", "cxfreeze")
-        if not os.path.isfile(cxfreeze):
-            print("ERROR: This script requires cx_freeze module")
+
+        pyinstaller = shutil.which('pyinstaller')
+        if not pyinstaller:
+            print("ERROR: This script requires pyinstaller.")
             sys.exit(1)
 
-        subprocess.check_call([python,
-                               cxfreeze,
-                               '--target-dir',
-                               main_stage,
-                               '--include-modules',
-                               modulestr,
-                               'meson.py'])
+        pyinstaller_tmpdir = 'pyinst-tmp'
+        if os.path.exists(pyinstaller_tmpdir):
+            shutil.rmtree(pyinstaller_tmpdir)
+        pyinst_cmd = [pyinstaller,
+                      '--clean',
+                      '--distpath',
+                      pyinstaller_tmpdir]
+        for m in modules:
+            pyinst_cmd += ['--hidden-import', m]
+        pyinst_cmd += ['meson.py']
+        subprocess.check_call(pyinst_cmd)
+        shutil.move(pyinstaller_tmpdir + '/meson', main_stage)
         if not os.path.exists(os.path.join(main_stage, 'meson.exe')):
             sys.exit('Meson exe missing from staging dir.')
         os.mkdir(ninja_stage)
@@ -288,7 +289,7 @@ class PackageGenerator:
 if __name__ == '__main__':
     if not os.path.exists('meson.py'):
         sys.exit(print('Run me in the top level source dir.'))
-    subprocess.check_call(['pip', 'install', '--upgrade', 'cx_freeze'])
+    subprocess.check_call(['pip', 'install', '--upgrade', 'pyinstaller'])
 
     p = PackageGenerator()
     p.build_dist()

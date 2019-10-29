@@ -19,6 +19,9 @@ import os.path
 import platform
 import cProfile as profile
 import argparse
+import tempfile
+import shutil
+import glob
 
 from . import environment, interpreter, mesonlib
 from . import build
@@ -29,14 +32,14 @@ from .mesonlib import MesonException
 
 def add_arguments(parser):
     coredata.register_builtin_arguments(parser)
-    parser.add_argument('--cross-file',
-                        default=[],
-                        action='append',
-                        help='File describing cross compilation environment.')
     parser.add_argument('--native-file',
                         default=[],
                         action='append',
                         help='File containing overrides for native compilation environment.')
+    parser.add_argument('--cross-file',
+                        default=[],
+                        action='append',
+                        help='File describing cross compilation environment.')
     parser.add_argument('-v', '--version', action='version',
                         version=coredata.version)
     parser.add_argument('--profile-self', action='store_true', dest='profile',
@@ -60,38 +63,36 @@ class MesonApp:
                                                                options.sourcedir,
                                                                options.reconfigure,
                                                                options.wipe)
-
         if options.wipe:
             # Make a copy of the cmd line file to make sure we can always
             # restore that file if anything bad happens. For example if
             # configuration fails we need to be able to wipe again.
-            filename = coredata.get_cmd_line_file(self.build_dir)
-            try:
-                with open(filename, 'r') as f:
-                    content = f.read()
-            except FileNotFoundError:
-                raise MesonException(
-                    'Cannot find cmd_line.txt. This is probably because this '
-                    'build directory was configured with a meson version < 0.49.0.')
+            restore = []
+            with tempfile.TemporaryDirectory() as d:
+                for filename in [coredata.get_cmd_line_file(self.build_dir)] + glob.glob(os.path.join(self.build_dir, environment.Environment.private_dir, '*.ini')):
+                    try:
+                        restore.append((shutil.copy(filename, d), filename))
+                    except FileNotFoundError:
+                        raise MesonException(
+                            'Cannot find cmd_line.txt. This is probably because this '
+                            'build directory was configured with a meson version < 0.49.0.')
 
-            coredata.read_cmd_line_file(self.build_dir, options)
+                coredata.read_cmd_line_file(self.build_dir, options)
 
-            try:
-                # Don't delete the whole tree, just all of the files and
-                # folders in the tree. Otherwise calling wipe form the builddir
-                # will cause a crash
-                for l in os.listdir(self.build_dir):
-                    l = os.path.join(self.build_dir, l)
-                    if os.path.isdir(l):
-                        mesonlib.windows_proof_rmtree(l)
-                    else:
-                        mesonlib.windows_proof_rm(l)
-            finally:
-                # Restore the file
-                path = os.path.dirname(filename)
-                os.makedirs(path, exist_ok=True)
-                with open(filename, 'w') as f:
-                    f.write(content)
+                try:
+                    # Don't delete the whole tree, just all of the files and
+                    # folders in the tree. Otherwise calling wipe form the builddir
+                    # will cause a crash
+                    for l in os.listdir(self.build_dir):
+                        l = os.path.join(self.build_dir, l)
+                        if os.path.isdir(l):
+                            mesonlib.windows_proof_rmtree(l)
+                        else:
+                            mesonlib.windows_proof_rm(l)
+                finally:
+                    for b, f in restore:
+                        os.makedirs(os.path.dirname(f), exist_ok=True)
+                        shutil.move(b, f)
 
         self.options = options
 
@@ -160,6 +161,7 @@ class MesonApp:
     def _generate(self, env):
         mlog.debug('Build started at', datetime.datetime.now().isoformat())
         mlog.debug('Main binary:', sys.executable)
+        mlog.debug('Build Options:', coredata.get_cmd_line_options(self.build_dir, self.options))
         mlog.debug('Python system:', platform.system())
         mlog.log(mlog.bold('The Meson build system'))
         mlog.log('Version:', coredata.version)
@@ -173,12 +175,15 @@ class MesonApp:
 
         intr = interpreter.Interpreter(b)
         if env.is_cross_build():
-            mlog.log('Host machine cpu family:', mlog.bold(intr.builtin['host_machine'].cpu_family_method([], {})))
-            mlog.log('Host machine cpu:', mlog.bold(intr.builtin['host_machine'].cpu_method([], {})))
-            mlog.log('Target machine cpu family:', mlog.bold(intr.builtin['target_machine'].cpu_family_method([], {})))
-            mlog.log('Target machine cpu:', mlog.bold(intr.builtin['target_machine'].cpu_method([], {})))
-        mlog.log('Build machine cpu family:', mlog.bold(intr.builtin['build_machine'].cpu_family_method([], {})))
-        mlog.log('Build machine cpu:', mlog.bold(intr.builtin['build_machine'].cpu_method([], {})))
+            logger_fun = mlog.log
+        else:
+            logger_fun = mlog.debug
+        logger_fun('Build machine cpu family:', mlog.bold(intr.builtin['build_machine'].cpu_family_method([], {})))
+        logger_fun('Build machine cpu:', mlog.bold(intr.builtin['build_machine'].cpu_method([], {})))
+        mlog.log('Host machine cpu family:', mlog.bold(intr.builtin['host_machine'].cpu_family_method([], {})))
+        mlog.log('Host machine cpu:', mlog.bold(intr.builtin['host_machine'].cpu_method([], {})))
+        logger_fun('Target machine cpu family:', mlog.bold(intr.builtin['target_machine'].cpu_family_method([], {})))
+        logger_fun('Target machine cpu:', mlog.bold(intr.builtin['target_machine'].cpu_method([], {})))
         try:
             if self.options.profile:
                 fname = os.path.join(self.build_dir, 'meson-private', 'profile-interpreter.log')

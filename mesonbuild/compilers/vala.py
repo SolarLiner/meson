@@ -13,19 +13,24 @@
 # limitations under the License.
 
 import os.path
+import typing
 
 from .. import mlog
 from ..mesonlib import EnvironmentException, MachineChoice, version_compare
 
 from .compilers import Compiler
 
+if typing.TYPE_CHECKING:
+    from ..envconfig import MachineInfo
+
 class ValaCompiler(Compiler):
-    def __init__(self, exelist, version):
+    def __init__(self, exelist, version, for_machine: MachineChoice,
+                 is_cross, info: 'MachineInfo'):
         self.language = 'vala'
-        super().__init__(exelist, version)
+        super().__init__(exelist, version, for_machine, info)
         self.version = version
+        self.is_cross = is_cross
         self.id = 'valac'
-        self.is_cross = False
         self.base_options = ['b_colorout']
 
     def name_string(self):
@@ -38,7 +43,7 @@ class ValaCompiler(Compiler):
         return []
 
     def get_debug_args(self, is_debug):
-        return ['--debug']
+        return ['--debug'] if is_debug else []
 
     def get_output_args(self, target):
         return [] # Because compiles into C.
@@ -87,15 +92,11 @@ class ValaCompiler(Compiler):
 
     def sanity_check(self, work_dir, environment):
         code = 'class MesonSanityCheck : Object { }'
-        if environment.is_cross_build() and not self.is_cross:
-            for_machine = MachineChoice.BUILD
-        else:
-            for_machine = MachineChoice.HOST
-        extra_flags = environment.coredata.get_external_args(for_machine, self.language)
+        extra_flags = environment.coredata.get_external_args(self.for_machine, self.language)
         if self.is_cross:
             extra_flags += self.get_compile_only_args()
         else:
-            extra_flags += environment.coredata.get_external_link_args(for_machine, self.language)
+            extra_flags += environment.coredata.get_external_link_args(self.for_machine, self.language)
         with self.cached_compile(code, environment.coredata, extra_args=extra_flags, mode='compile') as p:
             if p.returncode != 0:
                 msg = 'Vala compiler {!r} can not compile programs' \
@@ -114,11 +115,7 @@ class ValaCompiler(Compiler):
         # no extra dirs are specified.
         if not extra_dirs:
             code = 'class MesonFindLibrary : Object { }'
-            if env.is_cross_build() and not self.is_cross:
-                for_machine = MachineChoice.BUILD
-            else:
-                for_machine = MachineChoice.HOST
-            args = env.coredata.get_external_args(for_machine, self.language)
+            args = env.coredata.get_external_args(self.for_machine, self.language)
             vapi_args = ['--pkg', libname]
             args += vapi_args
             with self.cached_compile(code, env.coredata, extra_args=args, mode='compile') as p:

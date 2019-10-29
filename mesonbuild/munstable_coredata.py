@@ -14,6 +14,7 @@
 
 
 from . import coredata as cdata
+from .mesonlib import MachineChoice
 
 import os.path
 import pprint
@@ -35,9 +36,6 @@ def dump_compilers(compilers):
             print('      Full version: ' + compiler.full_version)
         if compiler.version:
             print('      Detected version: ' + compiler.version)
-        if hasattr(compiler, 'compiler_type'):
-            print('      Detected type: ' + repr(compiler.compiler_type))
-        #pprint.pprint(compiler.__dict__)
 
 
 def dump_guids(d):
@@ -91,20 +89,11 @@ def run(options):
             if v:
                 print('Native File: ' + ' '.join(v))
         elif k == 'compilers':
-            print('Cached native compilers:')
-            dump_compilers(v)
-        elif k == 'cross_compilers':
-            print('Cached cross compilers:')
-            dump_compilers(v)
+            for for_machine in MachineChoice:
+                print('Cached {} machine compilers:'.format(
+                    for_machine.get_lower_case_name()))
+                dump_compilers(v[for_machine])
         elif k == 'deps':
-            native = []
-            cross = []
-            for dep_key, dep in sorted(v.items()):
-                if dep_key[1]:
-                    cross.append((dep_key, dep))
-                else:
-                    native.append((dep_key, dep))
-
             def print_dep(dep_key, dep):
                 print('  ' + dep_key[0] + ": ")
                 print('      compile args: ' + repr(dep.get_compile_args()))
@@ -113,14 +102,13 @@ def run(options):
                     print('      sources: ' + repr(dep.get_sources()))
                 print('      version: ' + repr(dep.get_version()))
 
-            if native:
-                print('Cached native dependencies:')
-                for dep_key, dep in native:
-                    print_dep(dep_key, dep)
-            if cross:
-                print('Cached dependencies:')
-                for dep_key, dep in cross:
-                    print_dep(dep_key, dep)
+            for for_machine in iter(MachineChoice):
+                items_list = list(sorted(v[for_machine].items()))
+                if items_list:
+                    print('Cached dependencies for {} machine' % for_machine.get_lower_case_name())
+                    for dep_key, deps in items_list:
+                        for dep in deps:
+                            print_dep(dep_key, dep)
         else:
             print(k + ':')
             print(textwrap.indent(pprint.pformat(v), '  '))

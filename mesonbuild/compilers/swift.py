@@ -13,10 +13,14 @@
 # limitations under the License.
 
 import subprocess, os.path
+import typing
 
 from ..mesonlib import EnvironmentException, MachineChoice
 
 from .compilers import Compiler, swift_buildtype_args, clike_debug_args
+
+if typing.TYPE_CHECKING:
+    from ..envconfig import MachineInfo
 
 swift_optimization_args = {'0': [],
                            'g': [],
@@ -27,15 +31,16 @@ swift_optimization_args = {'0': [],
                            }
 
 class SwiftCompiler(Compiler):
-    def __init__(self, exelist, version):
+
+    LINKER_PREFIX = ['-Xlinker']
+
+    def __init__(self, exelist, version, for_machine: MachineChoice,
+                 is_cross, info: 'MachineInfo', **kwargs):
         self.language = 'swift'
-        super().__init__(exelist, version)
+        super().__init__(exelist, version, for_machine, info, **kwargs)
         self.version = version
         self.id = 'llvm'
-        self.is_cross = False
-
-    def get_linker_exelist(self):
-        return self.exelist[:]
+        self.is_cross = is_cross
 
     def name_string(self):
         return ' '.join(self.exelist)
@@ -58,9 +63,6 @@ class SwiftCompiler(Compiler):
     def get_output_args(self, target):
         return ['-o', target]
 
-    def get_linker_output_args(self, target):
-        return ['-o', target]
-
     def get_header_import_args(self, headername):
         return ['-import-objc-header', headername]
 
@@ -70,9 +72,6 @@ class SwiftCompiler(Compiler):
     def get_buildtype_args(self, buildtype):
         return swift_buildtype_args[buildtype]
 
-    def get_buildtype_linker_args(self, buildtype):
-        return []
-
     def get_std_exe_link_args(self):
         return ['-emit-executable']
 
@@ -81,9 +80,6 @@ class SwiftCompiler(Compiler):
 
     def get_mod_gen_args(self):
         return ['-emit-module']
-
-    def build_rpath_args(self, *args):
-        return [] # FIXME
 
     def get_include_args(self, dirname):
         return ['-I' + dirname]
@@ -102,15 +98,11 @@ class SwiftCompiler(Compiler):
         src = 'swifttest.swift'
         source_name = os.path.join(work_dir, src)
         output_name = os.path.join(work_dir, 'swifttest')
-        if environment.is_cross_build() and not self.is_cross:
-            for_machine = MachineChoice.BUILD
-        else:
-            for_machine = MachineChoice.HOST
-        extra_flags = environment.coredata.get_external_args(for_machine, self.language)
+        extra_flags = environment.coredata.get_external_args(self.for_machine, self.language)
         if self.is_cross:
             extra_flags += self.get_compile_only_args()
         else:
-            extra_flags += environment.coredata.get_external_link_args(for_machine, self.language)
+            extra_flags += environment.coredata.get_external_link_args(self.for_machine, self.language)
         with open(source_name, 'w') as ofile:
             ofile.write('''print("Swift compilation is working.")
 ''')

@@ -22,22 +22,24 @@ import re
 
 from .. import mesonlib, mlog
 from ..mesonlib import version_compare, stringlistify, extract_as_list, MachineChoice
+from ..environment import get_llvm_tool_names
 from .base import (
     DependencyException, DependencyMethods, ExternalDependency, PkgConfigDependency,
-    strip_system_libdirs, ConfigToolDependency, CMakeDependency
+    strip_system_libdirs, ConfigToolDependency, CMakeDependency, HasNativeKwarg
 )
 from .misc import ThreadDependency
 
 from typing import List, Tuple
 
 
-def get_shared_library_suffix(environment, native):
+def get_shared_library_suffix(environment, for_machine: MachineChoice):
     """This is only gauranteed to work for languages that compile to machine
     code, not for languages like C# that use a bytecode and always end in .dll
     """
-    if mesonlib.for_windows(native, environment):
+    m = environment.machines[for_machine]
+    if m.is_windows():
         return '.dll'
-    elif mesonlib.for_darwin(native, environment):
+    elif m.is_darwin():
         return '.dylib'
     return '.so'
 
@@ -203,32 +205,17 @@ class LLVMDependencyConfigTool(ConfigToolDependency):
     __cpp_blacklist = {'-DNDEBUG'}
 
     def __init__(self, environment, kwargs):
-        # Ordered list of llvm-config binaries to try. Start with base, then try
-        # newest back to oldest (3.5 is arbitrary), and finally the devel version.
-        # Please note that llvm-config-6.0 is a development snapshot and it should
-        # not be moved to the beginning of the list.
-        self.tools = [
-            'llvm-config', # base
-            'llvm-config-8',   'llvm-config80',
-            'llvm-config-7',   'llvm-config70',
-            'llvm-config-6.0', 'llvm-config60',
-            'llvm-config-5.0', 'llvm-config50',
-            'llvm-config-4.0', 'llvm-config40',
-            'llvm-config-3.9', 'llvm-config39',
-            'llvm-config-3.8', 'llvm-config38',
-            'llvm-config-3.7', 'llvm-config37',
-            'llvm-config-3.6', 'llvm-config36',
-            'llvm-config-3.5', 'llvm-config35',
-            'llvm-config-9',     # Debian development snapshot
-            'llvm-config-devel', # FreeBSD development snapshot
-        ]
+        # Already called by `super().__init__`, but need `self.for_machine`
+        # before `super().__init__` is called.
+        HasNativeKwarg.__init__(self, kwargs)
+
+        self.tools = get_llvm_tool_names('llvm-config')
 
         # Fedora starting with Fedora 30 adds a suffix of the number
         # of bits in the isa that llvm targets, for example, on x86_64
         # and aarch64 the name will be llvm-config-64, on x86 and arm
         # it will be llvm-config-32.
-        m = MachineChoice.BUILD if environment.is_cross_build() and kwargs.get('native', True) else MachineChoice.HOST
-        if environment.machines[m].is_64_bit:
+        if environment.machines[self.for_machine].is_64_bit:
             self.tools.append('llvm-config-64')
         else:
             self.tools.append('llvm-config-32')
@@ -256,23 +243,29 @@ class LLVMDependencyConfigTool(ConfigToolDependency):
             self._set_new_link_args(environment)
         else:
             self._set_old_link_args()
-        self.link_args = strip_system_libdirs(environment, self.link_args)
+        self.link_args = strip_system_libdirs(environment, self.for_machine, self.link_args)
         self.link_args = self.__fix_bogus_link_args(self.link_args)
         self._add_sub_dependency(ThreadDependency, environment, kwargs)
 
-    @staticmethod
-    def __fix_bogus_link_args(args):
+    def __fix_bogus_link_args(self, args):
         """This function attempts to fix bogus link arguments that llvm-config
         generates.
 
         Currently it works around the following:
             - FreeBSD: when statically linking -l/usr/lib/libexecinfo.so will
               be generated, strip the -l in cases like this.
+            - Windows: We may get -LIBPATH:... which is later interpreted as
+              "-L IBPATH:...", if we're using an msvc like compilers convert
+              that to "/LIBPATH", otherwise to "-L ..."
         """
+        cpp = self.env.coredata.compilers[self.for_machine]['cpp']
+
         new_args = []
         for arg in args:
             if arg.startswith('-l') and arg.endswith('.so'):
                 new_args.append(arg.lstrip('-l'))
+            elif arg.startswith('-LIBPATH:'):
+                new_args.extend(cpp.get_linker_search_args(arg.lstrip('-LIBPATH:')))
             else:
                 new_args.append(arg)
         return new_args
@@ -310,7 +303,7 @@ class LLVMDependencyConfigTool(ConfigToolDependency):
             try:
                 self.__check_libfiles(True)
             except DependencyException:
-                lib_ext = get_shared_library_suffix(environment, self.native)
+                lib_ext = get_shared_library_suffix(environment, self.for_machine)
                 libdir = self.get_config_value(['--libdir'], 'link_args')[0]
                 # Sort for reproducability
                 matches = sorted(glob.iglob(os.path.join(libdir, 'libLLVM*{}'.format(lib_ext))))
@@ -408,8 +401,8 @@ class LLVMDependencyCMake(CMakeDependency):
         super().__init__(name='LLVM', environment=env, language='cpp', kwargs=kwargs)
 
         # Extract extra include directories and definitions
-        inc_dirs = self.get_cmake_var('PACKAGE_INCLUDE_DIRS')
-        defs = self.get_cmake_var('PACKAGE_DEFINITIONS')
+        inc_dirs = self.traceparser.get_cmake_var('PACKAGE_INCLUDE_DIRS')
+        defs = self.traceparser.get_cmake_var('PACKAGE_DEFINITIONS')
         temp = ['-I' + x for x in inc_dirs] + defs
         self.compile_args += [x for x in temp if x not in self.compile_args]
         self._add_sub_dependency(ThreadDependency, env, kwargs)
@@ -424,7 +417,7 @@ class LLVMDependencyCMake(CMakeDependency):
     def _map_module_list(self, modules: List[Tuple[str, bool]]) -> List[Tuple[str, bool]]:
         res = []
         for mod, required in modules:
-            cm_targets = self.get_cmake_var('MESON_LLVM_TARGETS_{}'.format(mod))
+            cm_targets = self.traceparser.get_cmake_var('MESON_LLVM_TARGETS_{}'.format(mod))
             if not cm_targets:
                 if required:
                     raise self._gen_exception('LLVM module {} was not found'.format(mod))
@@ -436,7 +429,7 @@ class LLVMDependencyCMake(CMakeDependency):
         return res
 
     def _original_module_name(self, module: str) -> str:
-        orig_name = self.get_cmake_var('MESON_TARGET_TO_LLVM_{}'.format(module))
+        orig_name = self.traceparser.get_cmake_var('MESON_TARGET_TO_LLVM_{}'.format(module))
         if orig_name:
             return orig_name[0]
         return module
@@ -450,11 +443,11 @@ class LLVMDependency(ExternalDependency):
         methods = cls._process_method_kw(kwargs)
         candidates = []
 
-        if DependencyMethods.CMAKE in methods:
-            candidates.append(functools.partial(LLVMDependencyCMake, env, kwargs))
-
         if DependencyMethods.CONFIG_TOOL in methods:
             candidates.append(functools.partial(LLVMDependencyConfigTool, env, kwargs))
+
+        if DependencyMethods.CMAKE in methods:
+            candidates.append(functools.partial(LLVMDependencyCMake, env, kwargs))
 
         return candidates
 

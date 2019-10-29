@@ -13,22 +13,32 @@
 # limitations under the License.
 
 from . import mlog
-import pickle, os, uuid, shlex
+import pickle, os, uuid
 import sys
 from itertools import chain
 from pathlib import PurePath
 from collections import OrderedDict
 from .mesonlib import (
     MesonException, MachineChoice, PerMachine,
-    default_libdir, default_libexecdir, default_prefix
+    default_libdir, default_libexecdir, default_prefix, split_args
 )
 from .wrap import WrapMode
 import ast
 import argparse
 import configparser
-from typing import Optional, Any, TypeVar, Generic, Type, List, Union
+from typing import (
+    Any, Dict, Generic, Iterable, List, Optional, Type, TypeVar, Union
+)
+import typing
+import enum
+import shlex
 
-version = '0.50.999'
+if typing.TYPE_CHECKING:
+    from . import dependencies
+
+    OptionDictType = typing.Dict[str, 'UserOption[Any]']
+
+version = '0.52.999'
 backendlist = ['ninja', 'vs', 'vs2010', 'vs2015', 'vs2017', 'vs2019', 'xcode']
 
 default_yielding = False
@@ -154,9 +164,9 @@ class UserComboOption(UserOption[str]):
         return value
 
 class UserArrayOption(UserOption[List[str]]):
-    def __init__(self, description, value, shlex_split=False, user_input=False, allow_dups=False, **kwargs):
+    def __init__(self, description, value, split_args=False, user_input=False, allow_dups=False, **kwargs):
         super().__init__(description, kwargs.get('choices', []), yielding=kwargs.get('yielding', None))
-        self.shlex_split = shlex_split
+        self.split_args = split_args
         self.allow_dups = allow_dups
         self.value = self.validate_value(value, user_input=user_input)
 
@@ -174,8 +184,8 @@ class UserArrayOption(UserOption[List[str]]):
             elif value == '':
                 newvalue = []
             else:
-                if self.shlex_split:
-                    newvalue = shlex.split(value)
+                if self.split_args:
+                    newvalue = split_args(value)
                 else:
                     newvalue = [v.strip() for v in value.split(',')]
         elif isinstance(value, list):
@@ -221,13 +231,125 @@ def load_configs(filenames: List[str]) -> configparser.ConfigParser:
     return config
 
 
+if typing.TYPE_CHECKING:
+    CacheKeyType = typing.Tuple[typing.Tuple[typing.Any, ...], ...]
+    SubCacheKeyType = typing.Tuple[typing.Any, ...]
+
+
+class DependencyCacheType(enum.Enum):
+
+    OTHER = 0
+    PKG_CONFIG = 1
+    CMAKE = 2
+
+    @classmethod
+    def from_type(cls, dep: 'dependencies.Dependency') -> 'DependencyCacheType':
+        from . import dependencies
+        # As more types gain search overrides they'll need to be added here
+        if isinstance(dep, dependencies.PkgConfigDependency):
+            return cls.PKG_CONFIG
+        if isinstance(dep, dependencies.CMakeDependency):
+            return cls.CMAKE
+        return cls.OTHER
+
+
+class DependencySubCache:
+
+    def __init__(self, type_: DependencyCacheType):
+        self.types = [type_]
+        self.__cache = {}  # type: typing.Dict[SubCacheKeyType, dependencies.Dependency]
+
+    def __getitem__(self, key: 'SubCacheKeyType') -> 'dependencies.Dependency':
+        return self.__cache[key]
+
+    def __setitem__(self, key: 'SubCacheKeyType', value: 'dependencies.Dependency') -> None:
+        self.__cache[key] = value
+
+    def __contains__(self, key: 'SubCacheKeyType') -> bool:
+        return key in self.__cache
+
+    def values(self) -> typing.Iterable['dependencies.Dependency']:
+        return self.__cache.values()
+
+
+class DependencyCache:
+
+    """Class that stores a cache of dependencies.
+
+    This class is meant to encapsulate the fact that we need multiple keys to
+    successfully lookup by providing a simple get/put interface.
+    """
+
+    def __init__(self, builtins_per_machine: PerMachine[typing.Dict[str, UserOption[typing.Any]]], for_machine: MachineChoice):
+        self.__cache = OrderedDict()  # type: typing.MutableMapping[CacheKeyType, DependencySubCache]
+        self.__builtins_per_machine = builtins_per_machine
+        self.__for_machine = for_machine
+
+    def __calculate_subkey(self, type_: DependencyCacheType) -> typing.Tuple[typing.Any, ...]:
+        if type_ is DependencyCacheType.PKG_CONFIG:
+            return tuple(self.__builtins_per_machine[self.__for_machine]['pkg_config_path'].value)
+        elif type_ is DependencyCacheType.CMAKE:
+            return tuple(self.__builtins_per_machine[self.__for_machine]['cmake_prefix_path'].value)
+        assert type_ is DependencyCacheType.OTHER, 'Someone forgot to update subkey calculations for a new type'
+        return tuple()
+
+    def __iter__(self) -> typing.Iterator['CacheKeyType']:
+        return self.keys()
+
+    def put(self, key: 'CacheKeyType', dep: 'dependencies.Dependency') -> None:
+        t = DependencyCacheType.from_type(dep)
+        if key not in self.__cache:
+            self.__cache[key] = DependencySubCache(t)
+        subkey = self.__calculate_subkey(t)
+        self.__cache[key][subkey] = dep
+
+    def get(self, key: 'CacheKeyType') -> typing.Optional['dependencies.Dependency']:
+        """Get a value from the cache.
+
+        If there is no cache entry then None will be returned.
+        """
+        try:
+            val = self.__cache[key]
+        except KeyError:
+            return None
+
+        for t in val.types:
+            subkey = self.__calculate_subkey(t)
+            try:
+                return val[subkey]
+            except KeyError:
+                pass
+        return None
+
+    def values(self) -> typing.Iterator['dependencies.Dependency']:
+        for c in self.__cache.values():
+            yield from c.values()
+
+    def keys(self) -> typing.Iterator['CacheKeyType']:
+        return iter(self.__cache.keys())
+
+    def items(self) -> typing.Iterator[typing.Tuple['CacheKeyType', typing.List['dependencies.Dependency']]]:
+        for k, v in self.__cache.items():
+            vs = []
+            for t in v.types:
+                subkey = self.__calculate_subkey(t)
+                if subkey in v:
+                    vs.append(v[subkey])
+            yield k, vs
+
+    def clear(self) -> None:
+        self.__cache.clear()
+
+# Can't bind this near the class method it seems, sadly.
+_V = TypeVar('_V')
+
 # This class contains all data that must persist over multiple
 # invocations of Meson. It is roughly the same thing as
 # cmakecache.
 
 class CoreData:
 
-    def __init__(self, options):
+    def __init__(self, options: argparse.Namespace, scratch_dir: str):
         self.lang_guids = {
             'default': '8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942',
             'c': '8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942',
@@ -241,33 +363,59 @@ class CoreData:
         self.target_guids = {}
         self.version = version
         self.init_builtins()
-        self.backend_options = {}
-        self.user_options = {}
+        self.backend_options = {} # : Dict[str, UserOption]
+        self.user_options = {} # : Dict[str, UserOption]
         self.compiler_options = PerMachine({}, {})
-        self.base_options = {}
-        self.cross_files = self.__load_config_files(options.cross_file, 'cross')
-        self.compilers = OrderedDict()
-        self.cross_compilers = OrderedDict()
-        self.deps = OrderedDict()
+        self.base_options = {} # : Dict[str, UserOption]
+        self.cross_files = self.__load_config_files(options, scratch_dir, 'cross')
+        self.compilers = PerMachine(OrderedDict(), OrderedDict())
+
+        build_cache = DependencyCache(self.builtins_per_machine, MachineChoice.BUILD)
+        host_cache = DependencyCache(self.builtins_per_machine, MachineChoice.BUILD)
+        self.deps = PerMachine(build_cache, host_cache)  # type: PerMachine[DependencyCache]
         self.compiler_check_cache = OrderedDict()
         # Only to print a warning if it changes between Meson invocations.
-        self.config_files = self.__load_config_files(options.native_file, 'native')
+        self.config_files = self.__load_config_files(options, scratch_dir, 'native')
         self.libdir_cross_fixup()
 
     @staticmethod
-    def __load_config_files(filenames: Optional[List[str]], ftype: str) -> List[str]:
+    def __load_config_files(options: argparse.Namespace, scratch_dir: str, ftype: str) -> List[str]:
         # Need to try and make the passed filenames absolute because when the
         # files are parsed later we'll have chdir()d.
+        if ftype == 'cross':
+            filenames = options.cross_file
+        else:
+            filenames = options.native_file
+
         if not filenames:
             return []
 
-        real = []
-        for f in filenames:
+        found_invalid = []  # type: typing.List[str]
+        missing = []        # type: typing.List[str]
+        real = []           # type: typing.List[str]
+        for i, f in enumerate(filenames):
             f = os.path.expanduser(os.path.expandvars(f))
             if os.path.exists(f):
-                real.append(os.path.abspath(f))
-                continue
-            elif sys.platform != 'win32':
+                if os.path.isfile(f):
+                    real.append(os.path.abspath(f))
+                    continue
+                elif os.path.isdir(f):
+                    found_invalid.append(os.path.abspath(f))
+                else:
+                    # in this case we've been passed some kind of pipe, copy
+                    # the contents of that file into the meson private (scratch)
+                    # directory so that it can be re-read when wiping/reconfiguring
+                    copy = os.path.join(scratch_dir, '{}.{}.ini'.format(uuid.uuid4(), ftype))
+                    with open(f, 'r') as rf:
+                        with open(copy, 'w') as wf:
+                            wf.write(rf.read())
+                    real.append(copy)
+
+                    # Also replace the command line argument, as the pipe
+                    # probably wont exist on reconfigure
+                    filenames[i] = copy
+                    continue
+            if sys.platform != 'win32':
                 paths = [
                     os.environ.get('XDG_DATA_HOME', os.path.expanduser('~/.local/share')),
                 ] + os.environ.get('XDG_DATA_DIRS', '/usr/local/share:/usr/share').split(':')
@@ -277,9 +425,14 @@ class CoreData:
                         real.append(path_to_try)
                         break
                 else:
-                    raise MesonException('Cannot find specified {} file: {}'.format(ftype, f))
-                continue
+                    missing.append(f)
+            else:
+                missing.append(f)
 
+        if missing:
+            if found_invalid:
+                mlog.log('Found invalid candidates for', ftype, 'file:', *found_invalid)
+            mlog.log('Could not find any valid candidate for', ftype, 'files:', *missing)
             raise MesonException('Cannot find specified {} file: {}'.format(ftype, f))
         return real
 
@@ -291,6 +444,7 @@ class CoreData:
             self.builtins['libdir'].value = 'lib'
 
     def sanitize_prefix(self, prefix):
+        prefix = os.path.expanduser(prefix)
         if not os.path.isabs(prefix):
             raise MesonException('prefix value {!r} must be an absolute path'
                                  ''.format(prefix))
@@ -337,8 +491,10 @@ class CoreData:
         self.builtins = {}
         for key, opt in builtin_options.items():
             self.builtins[key] = opt.init_option()
-            if opt.separate_cross:
-                self.builtins['cross_' + key] = opt.init_option()
+        self.builtins_per_machine = PerMachine({}, {})
+        for for_machine in iter(MachineChoice):
+            for key, opt in builtin_options_per_machine.items():
+                self.builtins_per_machine[for_machine][key] = opt.init_option()
 
     def init_backend_options(self, backend_name):
         if backend_name == 'ninja':
@@ -354,28 +510,40 @@ class CoreData:
                     '')
 
     def get_builtin_option(self, optname):
-        if optname in self.builtins:
-            v = self.builtins[optname]
+        for opts in self._get_all_builtin_options():
+            v = opts.get(optname)
+            if v is None:
+                continue
             if optname == 'wrap_mode':
                 return WrapMode.from_string(v.value)
             return v.value
         raise RuntimeError('Tried to get unknown builtin option %s.' % optname)
 
-    def set_builtin_option(self, optname, value):
-        if optname == 'prefix':
-            value = self.sanitize_prefix(value)
-        elif optname in self.builtins:
-            prefix = self.builtins['prefix'].value
-            value = self.sanitize_dir_option_value(prefix, optname, value)
+    def _try_set_builtin_option(self, optname, value):
+        for opts in self._get_all_builtin_options():
+            opt = opts.get(optname)
+            if opt is None:
+                continue
+            if optname == 'prefix':
+                value = self.sanitize_prefix(value)
+            else:
+                prefix = self.builtins['prefix'].value
+                value = self.sanitize_dir_option_value(prefix, optname, value)
+            break
         else:
-            raise RuntimeError('Tried to set unknown builtin option %s.' % optname)
-        self.builtins[optname].set_value(value)
-
+            return False
+        opt.set_value(value)
         # Make sure that buildtype matches other settings.
         if optname == 'buildtype':
             self.set_others_from_buildtype(value)
         else:
             self.set_buildtype_from_others()
+        return True
+
+    def set_builtin_option(self, optname, value):
+        res = self._try_set_builtin_option(optname, value)
+        if not res:
+            raise RuntimeError('Tried to set unknown builtin option %s.' % optname)
 
     def set_others_from_buildtype(self, value):
         if value == 'plain':
@@ -416,29 +584,42 @@ class CoreData:
             mode = 'custom'
         self.builtins['buildtype'].set_value(mode)
 
-    def get_all_compiler_options(self):
-        # TODO think about cross and command-line interface. (Only .build is mentioned here.)
-        yield self.compiler_options.build
+    @staticmethod
+    def get_prefixed_options_per_machine(
+        options_per_machine # : PerMachine[Dict[str, _V]]]
+    ) -> Iterable[Dict[str, _V]]:
+        for for_machine in iter(MachineChoice):
+            prefix = for_machine.get_prefix()
+            yield {
+                prefix + k: v
+                for k, v in options_per_machine[for_machine].items()
+            }
 
-    def _get_all_nonbuiltin_options(self):
+    def _get_all_nonbuiltin_options(self) -> Iterable[Dict[str, UserOption]]:
         yield self.backend_options
         yield self.user_options
-        yield from self.get_all_compiler_options()
+        yield from self.get_prefixed_options_per_machine(self.compiler_options)
         yield self.base_options
 
-    def get_all_options(self):
-        return chain([self.builtins], self._get_all_nonbuiltin_options())
+    def _get_all_builtin_options(self) -> Dict[str, UserOption]:
+        yield from self.get_prefixed_options_per_machine(self.builtins_per_machine)
+        yield self.builtins
+
+    def get_all_options(self) -> Dict[str, UserOption]:
+        yield from self._get_all_nonbuiltin_options()
+        yield from self._get_all_builtin_options()
 
     def validate_option_value(self, option_name, override_value):
         for opts in self.get_all_options():
-            if option_name in opts:
-                opt = opts[option_name]
+            opt = opts.get(option_name)
+            if opt is not None:
                 try:
                     return opt.validate_value(override_value)
                 except MesonException as e:
                     raise type(e)(('Validation failed for option %s: ' % option_name) + str(e)) \
-                        .with_traceback(sys.exc_into()[2])
-        raise MesonException('Tried to validate unknown option %s.' % option_name)
+                        .with_traceback(sys.exc_info()[2])
+        else:
+            raise MesonException('Tried to validate unknown option %s.' % option_name)
 
     def get_external_args(self, for_machine: MachineChoice, lang):
         return self.compiler_options[for_machine][lang + '_args'].value
@@ -455,7 +636,28 @@ class CoreData:
                 if type(oldval) != type(value):
                     self.user_options[name] = value
 
-    def set_options(self, options, subproject='', warn_unknown=True):
+    def is_cross_build(self) -> bool:
+        return len(self.cross_files) > 0
+
+    def strip_build_option_names(self, options):
+        res = {}
+        for k, v in options.items():
+            if k.startswith('build.'):
+                k = k.split('.', 1)[1]
+            res[k] = v
+        return res
+
+    def copy_build_options_from_regular_ones(self):
+        assert(not self.is_cross_build())
+        for k, o in self.builtins_per_machine.host.items():
+            self.builtins_per_machine.build[k].set_value(o.value)
+        for k, o in self.compiler_options.host.items():
+            if k in self.compiler_options.build:
+                self.compiler_options.build[k].set_value(o.value)
+
+    def set_options(self, options, *, subproject='', warn_unknown=True):
+        if not self.is_cross_build():
+            options = self.strip_build_option_names(options)
         # Set prefix first because it's needed to sanitize other options
         prefix = self.builtins['prefix'].value
         if 'prefix' in options:
@@ -468,21 +670,23 @@ class CoreData:
         unknown_options = []
         for k, v in options.items():
             if k == 'prefix':
-                pass
-            elif k in self.builtins:
-                self.set_builtin_option(k, v)
+                continue
+            if self._try_set_builtin_option(k, v):
+                continue
+            for opts in self._get_all_nonbuiltin_options():
+                tgt = opts.get(k)
+                if tgt is None:
+                    continue
+                tgt.set_value(v)
+                break
             else:
-                for opts in self._get_all_nonbuiltin_options():
-                    if k in opts:
-                        tgt = opts[k]
-                        tgt.set_value(v)
-                        break
-                else:
-                    unknown_options.append(k)
+                unknown_options.append(k)
         if unknown_options and warn_unknown:
             unknown_options = ', '.join(sorted(unknown_options))
             sub = 'In subproject {}: '.format(subproject) if subproject else ''
             mlog.warning('{}Unknown options: "{}"'.format(sub, unknown_options))
+        if not self.is_cross_build():
+            self.copy_build_options_from_regular_ones()
 
     def set_default_options(self, default_options, subproject, env):
         # Set defaults first from conf files (cross or native), then
@@ -510,51 +714,47 @@ class CoreData:
 
         # Some options default to environment variables if they are
         # unset, set those now. These will either be overwritten
-        # below, or they won't.
-        options['pkg_config_path'] = os.environ.get('PKG_CONFIG_PATH', '').split(':')
+        # below, or they won't. These should only be set on the first run.
+        if env.first_invocation:
+            p_env = os.environ.get('PKG_CONFIG_PATH')
+            if p_env:
+                # PKG_CONFIG_PATH may contain duplicates, which must be
+                # removed, else a duplicates-in-array-option warning arises.
+                pkg_config_paths = []
+                for k in p_env.split(':'):
+                    if k not in pkg_config_paths:
+                        pkg_config_paths.append(k)
+                options['pkg_config_path'] = pkg_config_paths
 
         for k, v in env.cmd_line_options.items():
             if subproject:
                 if not k.startswith(subproject + ':'):
                     continue
-            elif k not in builtin_options:
+            elif k not in builtin_options.keys() \
+                    and 'build.' + k not in builtin_options_per_machine.keys() \
+                    and k not in builtin_options_per_machine.keys():
                 if ':' in k:
                     continue
                 if optinterpreter.is_invalid_name(k, log=False):
                     continue
             options[k] = v
 
-        self.set_options(options, subproject)
+        self.set_options(options, subproject=subproject)
 
-    def process_new_compilers(self, lang: str, comp, cross_comp, env):
+    def process_new_compiler(self, lang: str, comp, env):
         from . import compilers
 
-        self.compilers[lang] = comp
-        if cross_comp is not None:
-            self.cross_compilers[lang] = cross_comp
-
-        # Native compiler always exist so always add its options.
-        new_options_for_build = comp.get_and_default_options(env.properties.build)
-        if cross_comp is not None:
-            new_options_for_host = cross_comp.get_and_default_options(env.properties.host)
-        else:
-            new_options_for_host = new_options_for_build
-
-        opts_machines_list = [
-            (new_options_for_build, MachineChoice.BUILD),
-            (new_options_for_host, MachineChoice.HOST),
-        ]
+        self.compilers[comp.for_machine][lang] = comp
 
         optprefix = lang + '_'
-        for new_options, for_machine in opts_machines_list:
-            for k, o in new_options.items():
-                if not k.startswith(optprefix):
-                    raise MesonException('Internal error, %s has incorrect prefix.' % k)
-                if (env.machines.matches_build_machine(for_machine) and
-                        k in env.cmd_line_options):
-                    # TODO think about cross and command-line interface.
-                    o.set_value(env.cmd_line_options[k])
-                self.compiler_options[for_machine].setdefault(k, o)
+        for k, o in comp.get_and_default_options(env.properties[comp.for_machine]).items():
+            if not k.startswith(optprefix):
+                raise MesonException('Internal error, %s has incorrect prefix.' % k)
+            # prefixed compiler options affect just this machine
+            opt_prefix = comp.for_machine.get_prefix()
+            if opt_prefix + k in env.cmd_line_options:
+                o.set_value(env.cmd_line_options[opt_prefix + k])
+            self.compiler_options[comp.for_machine].setdefault(k, o)
 
         enabled_opts = []
         for optname in comp.base_options:
@@ -583,6 +783,9 @@ def get_cmd_line_file(build_dir):
 
 def read_cmd_line_file(build_dir, options):
     filename = get_cmd_line_file(build_dir)
+    if not os.path.isfile(filename):
+        return
+
     config = CmdLineFileParser()
     config.read(filename)
 
@@ -622,6 +825,16 @@ def update_cmd_line_file(build_dir, options):
     config['options'].update(options.cmd_line_options)
     with open(filename, 'w') as f:
         config.write(f)
+
+def get_cmd_line_options(build_dir, options):
+    copy = argparse.Namespace(**vars(options))
+    read_cmd_line_file(build_dir, copy)
+    cmdline = ['-D{}={}'.format(k, v) for k, v in copy.cmd_line_options.items()]
+    if options.cross_file:
+        cmdline += ['--cross-file {}'.format(f) for f in options.cross_file]
+    if options.native_file:
+        cmdline += ['--native-file {}'.format(f) for f in options.native_file]
+    return ' '.join([shlex.quote(x) for x in cmdline])
 
 def major_versions_differ(v1, v2):
     return v1.split('.')[0:2] != v2.split('.')[0:2]
@@ -666,7 +879,10 @@ def save(obj, build_dir):
 
 def register_builtin_arguments(parser):
     for n, b in builtin_options.items():
-        b.add_to_argparse(n, parser)
+        b.add_to_argparse(n, parser, '', '')
+    for n, b in builtin_options_per_machine.items():
+        b.add_to_argparse(n, parser, '', ' (just for host machine)')
+        b.add_to_argparse(n, parser, 'build.', ' (just for build machine)')
     parser.add_argument('-D', action='append', dest='projectoptions', default=[], metavar="option",
                         help='Set the value of an option, can be used several times to set multiple options.')
 
@@ -684,19 +900,19 @@ def parse_cmd_line_options(args):
     args.cmd_line_options = create_options_dict(args.projectoptions)
 
     # Merge builtin options set with --option into the dict.
-    for name, builtin in builtin_options.items():
-        names = [name]
-        if builtin.separate_cross:
-            names.append('cross_' + name)
-        for name in names:
-            value = getattr(args, name, None)
-            if value is not None:
-                if name in args.cmd_line_options:
-                    cmdline_name = BuiltinOption.argparse_name_to_arg(name)
-                    raise MesonException(
-                        'Got argument {0} as both -D{0} and {1}. Pick one.'.format(name, cmdline_name))
-                args.cmd_line_options[name] = value
-                delattr(args, name)
+    for name in chain(
+            builtin_options.keys(),
+            ('build.' + k for k in builtin_options_per_machine.keys()),
+            builtin_options_per_machine.keys(),
+    ):
+        value = getattr(args, name, None)
+        if value is not None:
+            if name in args.cmd_line_options:
+                cmdline_name = BuiltinOption.argparse_name_to_arg(name)
+                raise MesonException(
+                    'Got argument {0} as both -D{0} and {1}. Pick one.'.format(name, cmdline_name))
+            args.cmd_line_options[name] = value
+            delattr(args, name)
 
 
 _U = TypeVar('_U', bound=UserOption[_T])
@@ -709,13 +925,12 @@ class BuiltinOption(Generic[_T, _U]):
     """
 
     def __init__(self, opt_type: Type[_U], description: str, default: Any, yielding: Optional[bool] = None, *,
-                 choices: Any = None, separate_cross: bool = False):
+                 choices: Any = None):
         self.opt_type = opt_type
         self.description = description
         self.default = default
         self.choices = choices
         self.yielding = yielding
-        self.separate_cross = separate_cross
 
     def init_option(self) -> _U:
         """Create an instance of opt_type and return it."""
@@ -754,7 +969,7 @@ class BuiltinOption(Generic[_T, _U]):
             pass
         return self.default
 
-    def add_to_argparse(self, name: str, parser: argparse.ArgumentParser) -> None:
+    def add_to_argparse(self, name: str, parser: argparse.ArgumentParser, prefix: str, help_suffix: str) -> None:
         kwargs = {}
 
         c = self._argparse_choices()
@@ -767,13 +982,10 @@ class BuiltinOption(Generic[_T, _U]):
         if c and not b:
             kwargs['choices'] = c
         kwargs['default'] = argparse.SUPPRESS
-        kwargs['dest'] = name
+        kwargs['dest'] = prefix + name
 
-        cmdline_name = self.argparse_name_to_arg(name)
-        parser.add_argument(cmdline_name, help=h, **kwargs)
-        if self.separate_cross:
-            kwargs['dest'] = 'cross_' + name
-            parser.add_argument(self.argparse_name_to_arg('cross_' + name), help=h + ' (for host in cross compiles)', **kwargs)
+        cmdline_name = self.argparse_name_to_arg(prefix + name)
+        parser.add_argument(cmdline_name, help=h + help_suffix, **kwargs)
 
 # Update `docs/markdown/Builtin-options.md` after changing the options below
 builtin_options = OrderedDict([
@@ -801,7 +1013,6 @@ builtin_options = OrderedDict([
     ('errorlogs',       BuiltinOption(UserBooleanOption, "Whether to print the logs from failing tests", True)),
     ('install_umask',   BuiltinOption(UserUmaskOption, 'Default umask to apply on permissions of installed files', '022')),
     ('layout',          BuiltinOption(UserComboOption, 'Build directory layout', 'mirror', choices=['mirror', 'flat'])),
-    ('pkg_config_path', BuiltinOption(UserArrayOption, 'List of additional paths for pkg-config to search', [], separate_cross=True)),
     ('optimization',    BuiltinOption(UserComboOption, 'Optimization level', '0', choices=['0', 'g', '1', '2', '3', 's'])),
     ('stdsplit',        BuiltinOption(UserBooleanOption, 'Split stdout and stderr in test logs', True)),
     ('strip',           BuiltinOption(UserBooleanOption, 'Strip targets on install', False)),
@@ -809,6 +1020,11 @@ builtin_options = OrderedDict([
     ('warning_level',   BuiltinOption(UserComboOption, 'Compiler warning level to use', '1', choices=['0', '1', '2', '3'])),
     ('werror',          BuiltinOption(UserBooleanOption, 'Treat warnings as errors', False)),
     ('wrap_mode',       BuiltinOption(UserComboOption, 'Wrap mode', 'default', choices=['default', 'nofallback', 'nodownload', 'forcefallback'])),
+])
+
+builtin_options_per_machine = OrderedDict([
+    ('pkg_config_path', BuiltinOption(UserArrayOption, 'List of additional paths for pkg-config to search', [])),
+    ('cmake_prefix_path', BuiltinOption(UserArrayOption, 'List of additional prefixes for cmake to search', [])),
 ])
 
 # Special prefix-dependent defaults for installation directories that reside in

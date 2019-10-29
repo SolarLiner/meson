@@ -1,4 +1,7 @@
-submodule (a1:a2) a3
+! submodule (bogus) foo
+! testing don't detect commented submodule
+
+submodule (a1:a2) a3  ! testing inline comment
 
 contains
 

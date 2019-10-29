@@ -36,11 +36,24 @@ depf2 = dependency('ZLIB', required : false, method : 'cmake', modules : 'dfggh:
 
 assert(depf2.found() == false, 'Invalid CMake targets should fail')
 
+# Try to find cmMesonTestDep in a custom prefix
+
+depPrefEnv = dependency('cmMesonTestDep', required : true, method : 'cmake')
+
 # Try to find a dependency with a custom CMake module
 
 depm1 = dependency('SomethingLikeZLIB', required : true, method : 'cmake', cmake_module_path : 'cmake')
 depm2 = dependency('SomethingLikeZLIB', required : true, method : 'cmake', cmake_module_path : ['cmake'])
 depm3 = dependency('SomethingLikeZLIB', required : true, cmake_module_path : 'cmake')
+
+# Test some edge cases with spaces, etc.
+
+testDep1 = dependency('ImportedTarget', required : true, method : 'cmake', cmake_module_path : 'cmake', modules: 'mesonTestLibDefs')
+testDep2 = dependency('ImportedTarget', required : true, method : 'cmake', cmake_module_path : 'cmake', modules : ['MesonTest::TestLibDefs'])
+testFlagSet1 = executable('testFlagSet1', ['testFlagSet.c'], dependencies: [testDep1])
+testFlagSet2 = executable('testFlagSet2', ['testFlagSet.c'], dependencies: [testDep2])
+test('testFlagSetTest1', testFlagSet1)
+test('testFlagSetTest2', testFlagSet2)
 
 # Try to compile a test that takes a dep and an include_directories
 

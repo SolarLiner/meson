@@ -18,8 +18,9 @@ import urllib.request, os, hashlib, shutil, tempfile, stat
 import subprocess
 import sys
 import configparser
+
 from . import WrapMode
-from ..mesonlib import MesonException
+from ..mesonlib import ProgressBar, MesonException
 
 try:
     import ssl
@@ -111,7 +112,7 @@ class Resolver:
         self.subdir_root = subdir_root
         self.cachedir = os.path.join(self.subdir_root, 'packagecache')
 
-    def resolve(self, packagename):
+    def resolve(self, packagename: str, method: str):
         self.packagename = packagename
         self.directory = packagename
         # We always have to load the wrap file, if it exists, because it could
@@ -123,9 +124,15 @@ class Resolver:
                 raise WrapException('Directory key must be a name and not a path')
         self.dirname = os.path.join(self.subdir_root, self.directory)
         meson_file = os.path.join(self.dirname, 'meson.build')
+        cmake_file = os.path.join(self.dirname, 'CMakeLists.txt')
+
+        if method not in ['meson', 'cmake']:
+            raise WrapException('Only the methods "meson" and "cmake" are supported')
 
         # The directory is there and has meson.build? Great, use it.
-        if os.path.exists(meson_file):
+        if method == 'meson' and os.path.exists(meson_file):
+            return self.directory
+        if method == 'cmake' and os.path.exists(cmake_file):
             return self.directory
 
         # Check if the subproject is a git submodule
@@ -153,9 +160,11 @@ class Resolver:
                 else:
                     raise WrapException('Unknown wrap type {!r}'.format(self.wrap.type))
 
-        # A meson.build file is required in the directory
-        if not os.path.exists(meson_file):
+        # A meson.build or CMakeLists.txt file is required in the directory
+        if method == 'meson' and not os.path.exists(meson_file):
             raise WrapException('Subproject exists but has no meson.build file')
+        if method == 'cmake' and not os.path.exists(cmake_file):
+            raise WrapException('Subproject exists but has no CMakeLists.txt file')
 
         return self.directory
 
@@ -218,21 +227,55 @@ class Resolver:
 
     def get_git(self):
         revno = self.wrap.get('revision')
-        subprocess.check_call(['git', 'clone', self.wrap.get('url'),
-                               self.directory], cwd=self.subdir_root)
-        if revno.lower() != 'head':
-            if subprocess.call(['git', 'checkout', revno], cwd=self.dirname) != 0:
-                subprocess.check_call(['git', 'fetch', self.wrap.get('url'), revno], cwd=self.dirname)
-                subprocess.check_call(['git', 'checkout', revno], cwd=self.dirname)
-        if self.wrap.values.get('clone-recursive', '').lower() == 'true':
-            subprocess.check_call(['git', 'submodule', 'update',
-                                   '--init', '--checkout', '--recursive'],
+        is_shallow = self.wrap.values.get('depth', '') != ''
+        # for some reason git only allows commit ids to be shallowly fetched by fetch not with clone
+        if is_shallow and self.is_git_full_commit_id(revno):
+            # git doesn't support directly cloning shallowly for commits,
+            # so we follow https://stackoverflow.com/a/43136160
+            subprocess.check_call(['git', 'init', self.directory], cwd=self.subdir_root)
+            subprocess.check_call(['git', 'remote', 'add', 'origin', self.wrap.get('url')],
                                   cwd=self.dirname)
-        push_url = self.wrap.values.get('push-url')
-        if push_url:
-            subprocess.check_call(['git', 'remote', 'set-url',
-                                   '--push', 'origin', push_url],
+            revno = self.wrap.get('revision')
+            subprocess.check_call(['git', 'fetch', '--depth', self.wrap.values.get('depth'), 'origin', revno],
                                   cwd=self.dirname)
+            subprocess.check_call(['git', 'checkout', revno], cwd=self.dirname)
+            if self.wrap.values.get('clone-recursive', '').lower() == 'true':
+                subprocess.check_call(['git', 'submodule', 'update',
+                                       '--init', '--checkout', '--recursive', '--depth', self.wrap.values.get('depth')],
+                                      cwd=self.dirname)
+            push_url = self.wrap.values.get('push-url')
+            if push_url:
+                subprocess.check_call(['git', 'remote', 'set-url',
+                                       '--push', 'origin', push_url],
+                                      cwd=self.dirname)
+        else:
+            if not is_shallow:
+                subprocess.check_call(['git', 'clone', self.wrap.get('url'),
+                                       self.directory], cwd=self.subdir_root)
+                if revno.lower() != 'head':
+                    if subprocess.call(['git', 'checkout', revno], cwd=self.dirname) != 0:
+                        subprocess.check_call(['git', 'fetch', self.wrap.get('url'), revno], cwd=self.dirname)
+                        subprocess.check_call(['git', 'checkout', revno], cwd=self.dirname)
+            else:
+                subprocess.check_call(['git', 'clone', '--depth', self.wrap.values.get('depth'),
+                                       '--branch', revno,
+                                       self.wrap.get('url'),
+                                       self.directory], cwd=self.subdir_root)
+            if self.wrap.values.get('clone-recursive', '').lower() == 'true':
+                subprocess.check_call(['git', 'submodule', 'update',
+                                       '--init', '--checkout', '--recursive', '--depth', self.wrap.values.get('depth')],
+                                      cwd=self.dirname)
+            push_url = self.wrap.values.get('push-url')
+            if push_url:
+                subprocess.check_call(['git', 'remote', 'set-url',
+                                       '--push', 'origin', push_url],
+                                      cwd=self.dirname)
+
+    def is_git_full_commit_id(self, revno):
+        result = False
+        if len(revno) in (40, 64): # 40 for sha1, 64 for upcoming sha256
+            result = all((ch in '0123456789AaBbCcDdEeFf' for ch in revno))
+        return result
 
     def get_hg(self):
         revno = self.wrap.get('revision')
@@ -270,24 +313,17 @@ class Resolver:
                     tmpfile.write(block)
                 hashvalue = h.hexdigest()
                 return hashvalue, tmpfile.name
-            print('Download size:', dlsize)
-            print('Downloading: ', end='')
             sys.stdout.flush()
-            printed_dots = 0
-            downloaded = 0
+            progress_bar = ProgressBar(bar_type='download', total=dlsize,
+                                       desc='Downloading')
             while True:
                 block = resp.read(blocksize)
                 if block == b'':
                     break
-                downloaded += len(block)
                 h.update(block)
                 tmpfile.write(block)
-                ratio = int(downloaded / dlsize * 10)
-                while printed_dots < ratio:
-                    print('.', end='')
-                    sys.stdout.flush()
-                    printed_dots += 1
-            print('')
+                progress_bar.update(len(block))
+            progress_bar.close()
             hashvalue = h.hexdigest()
         return hashvalue, tmpfile.name
 

@@ -18,12 +18,12 @@ import re
 
 from .. import mlog
 from .. import mesonlib, build
-from ..mesonlib import MesonException, extract_as_list
+from ..mesonlib import MachineChoice, MesonException, extract_as_list
 from . import get_include_args
 from . import ModuleReturnValue
 from . import ExtensionModule
 from ..interpreter import CustomTargetHolder
-from ..interpreterbase import permittedKwargs, FeatureNewKwargs
+from ..interpreterbase import permittedKwargs, FeatureNewKwargs, flatten
 from ..dependencies import ExternalProgram
 
 class ResourceCompilerType(enum.Enum):
@@ -41,16 +41,17 @@ class WindowsModule(ExtensionModule):
     def _find_resource_compiler(self, state):
         # FIXME: Does not handle `native: true` executables, see
         # See https://github.com/mesonbuild/meson/issues/1531
-        # But given a machine, we can un-hardcode `binaries.host` below.
+        # Take a parameter instead of the hardcoded definition below
+        for_machine = MachineChoice.HOST
 
         if hasattr(self, '_rescomp'):
             return self._rescomp
 
         # Will try cross / native file and then env var
-        rescomp = ExternalProgram.from_bin_list(state.environment.binaries.host, 'windres')
+        rescomp = ExternalProgram.from_bin_list(state.environment.binaries[for_machine], 'windres')
 
         if not rescomp or not rescomp.found():
-            comp = self.detect_compiler(state.compilers)
+            comp = self.detect_compiler(state.environment.coredata.compilers[for_machine])
             if comp.id in {'msvc', 'clang-cl', 'intel-cl'}:
                 rescomp = ExternalProgram('rc', silent=True)
             else:
@@ -77,7 +78,7 @@ class WindowsModule(ExtensionModule):
     @FeatureNewKwargs('windows.compile_resources', '0.47.0', ['depend_files', 'depends'])
     @permittedKwargs({'args', 'include_directories', 'depend_files', 'depends'})
     def compile_resources(self, state, args, kwargs):
-        extra_args = mesonlib.stringlistify(kwargs.get('args', []))
+        extra_args = mesonlib.stringlistify(flatten(kwargs.get('args', [])))
         wrc_depend_files = extract_as_list(kwargs, 'depend_files', pop = True)
         wrc_depends = extract_as_list(kwargs, 'depends', pop = True)
         for d in wrc_depends:

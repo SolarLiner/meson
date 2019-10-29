@@ -17,13 +17,21 @@ import typing
 
 from ..mesonlib import EnvironmentException, MachineChoice
 
-from .clike import CLikeCompiler
-from .compilers import Compiler, ClangCompiler, GnuCompiler
+from .compilers import Compiler
+from .mixins.clike import CLikeCompiler
+from .mixins.gnu import GnuCompiler
+from .mixins.clang import ClangCompiler
+
+if typing.TYPE_CHECKING:
+    from ..envconfig import MachineInfo
+
 
 class ObjCCompiler(CLikeCompiler, Compiler):
-    def __init__(self, exelist, version, is_cross: bool, exe_wrap: typing.Optional[str]):
+    def __init__(self, exelist, version, for_machine: MachineChoice,
+                 is_cross: bool, info: 'MachineInfo',
+                 exe_wrap: typing.Optional[str], **kwargs):
         self.language = 'objc'
-        Compiler.__init__(self, exelist, version)
+        Compiler.__init__(self, exelist, version, for_machine, info, **kwargs)
         CLikeCompiler.__init__(self, is_cross, exe_wrap)
 
     def get_display_language(self):
@@ -33,18 +41,14 @@ class ObjCCompiler(CLikeCompiler, Compiler):
         # TODO try to use sanity_check_impl instead of duplicated code
         source_name = os.path.join(work_dir, 'sanitycheckobjc.m')
         binary_name = os.path.join(work_dir, 'sanitycheckobjc')
-        if environment.is_cross_build() and not self.is_cross:
-            for_machine = MachineChoice.BUILD
-        else:
-            for_machine = MachineChoice.HOST
-        extra_flags = environment.coredata.get_external_args(for_machine, self.language)
+        extra_flags = environment.coredata.get_external_args(self.for_machine, self.language)
         if self.is_cross:
             extra_flags += self.get_compile_only_args()
         else:
-            extra_flags += environment.coredata.get_external_link_args(for_machine, self.language)
+            extra_flags += environment.coredata.get_external_link_args(self.for_machine, self.language)
         with open(source_name, 'w') as ofile:
-            ofile.write('#import<stdio.h>\n'
-                        'int main(int argc, char **argv) { return 0; }\n')
+            ofile.write('#import<stddef.h>\n'
+                        'int main() { return 0; }\n')
         pc = subprocess.Popen(self.exelist + extra_flags + [source_name, '-o', binary_name])
         pc.wait()
         if pc.returncode != 0:
@@ -59,9 +63,12 @@ class ObjCCompiler(CLikeCompiler, Compiler):
 
 
 class GnuObjCCompiler(GnuCompiler, ObjCCompiler):
-    def __init__(self, exelist, version, compiler_type, is_cross, exe_wrapper=None, defines=None):
-        ObjCCompiler.__init__(self, exelist, version, is_cross, exe_wrapper)
-        GnuCompiler.__init__(self, compiler_type, defines)
+    def __init__(self, exelist, version, for_machine: MachineChoice,
+                 is_cross, info: 'MachineInfo', exe_wrapper=None,
+                 defines=None, **kwargs):
+        ObjCCompiler.__init__(self, exelist, version, for_machine, is_cross,
+                              info, exe_wrapper, **kwargs)
+        GnuCompiler.__init__(self, defines)
         default_warn_args = ['-Wall', '-Winvalid-pch']
         self.warn_args = {'0': [],
                           '1': default_warn_args,
@@ -70,12 +77,14 @@ class GnuObjCCompiler(GnuCompiler, ObjCCompiler):
 
 
 class ClangObjCCompiler(ClangCompiler, ObjCCompiler):
-    def __init__(self, exelist, version, compiler_type, is_cross, exe_wrapper=None):
-        ObjCCompiler.__init__(self, exelist, version, is_cross, exe_wrapper)
-        ClangCompiler.__init__(self, compiler_type)
+    def __init__(self, exelist, version, for_machine: MachineChoice,
+                 is_cross, info: 'MachineInfo', exe_wrapper=None,
+                 **kwargs):
+        ObjCCompiler.__init__(self, exelist, version, for_machine, is_cross,
+                              info, exe_wrapper, **kwargs)
+        ClangCompiler.__init__(self)
         default_warn_args = ['-Wall', '-Winvalid-pch']
         self.warn_args = {'0': [],
                           '1': default_warn_args,
                           '2': default_warn_args + ['-Wextra'],
                           '3': default_warn_args + ['-Wextra', '-Wpedantic']}
-        self.base_options = ['b_pch', 'b_lto', 'b_pgo', 'b_sanitize', 'b_coverage']

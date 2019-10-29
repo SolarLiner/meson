@@ -225,8 +225,9 @@ useful when running the application locally for example during tests.
 * `build_by_default`: causes, when set to true, to have this target be
   built by default, that is, when invoking plain `ninja`, the default
   value is true for all built target types
-* `depend_files`: files ([`string`](#string-object),
-  [`files()`](#files), or [`configure_file()`](#configure_file)) of
+* `depend_files`: files ([`string`](Reference-manual.md#string-object),
+  [`files()`](Reference-manual.md#files), or
+  [`configure_file()`](Reference-manual.md#configure_file)) of
   schema source XML files that should trigger a re-compile if changed.
 
 ### gnome.gdbus_codegen()
@@ -339,9 +340,15 @@ of the module.
 * `scanobjs_args`: a list of arguments to pass to `gtkdoc-scangobj`
 * `c_args`: (*Added 0.48.0*) additional compile arguments to pass
 * `src_dir`: include_directories to include
+* `check`: (*Since 0.52.0*) if `true` runs `gtkdoc-check` when running unit tests.
+  Note that this has the downside of rebuilding the doc for each build, which is
+  often very slow. It usually should be enabled only in CI.
 
 This creates a `$module-doc` target that can be ran to build docs and
 normally these are only built on install.
+
+*Since 0.52.0* Returns a target object that can be passed as dependency to other
+targets using generated doc files (e.g. in `content_files` of another doc).
 
 ### gnome.gtkdoc_html_dir()
 

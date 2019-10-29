@@ -18,11 +18,11 @@ from pathlib import Path
 import functools
 import os
 import re
-import shlex
 import sysconfig
 
 from .. import mlog
 from .. import mesonlib
+from ..mesonlib import split_args
 from ..environment import detect_cpu_family
 
 from .base import (
@@ -66,6 +66,10 @@ class CoarrayDependency(ExternalDependency):
             self.is_found = True
             self.link_args = ['-coarray=shared']
             self.compile_args = self.link_args
+        elif cid == 'intel-cl':
+            """ Coarrays are built into Intel compilers, no external library needed """
+            self.is_found = True
+            self.compile_args = ['/Qcoarray:shared']
         elif cid == 'nagfor':
             """ NAG doesn't require any special arguments for Coarray """
             self.is_found = True
@@ -213,7 +217,7 @@ class MPIDependency(ExternalDependency):
 
         if not self.is_found and mesonlib.is_windows():
             # only Intel Fortran compiler is compatible with Microsoft MPI at this time.
-            if language == 'fortran' and environment.detect_fortran_compiler(False).name_string() != 'intel':
+            if language == 'fortran' and environment.detect_fortran_compiler(self.for_machine).name_string() != 'intel-cl':
                 return
             result = self._try_msmpi()
             if result is not None:
@@ -228,7 +232,7 @@ class MPIDependency(ExternalDependency):
         result = []
         multi_args = ('-I', )
         if self.language == 'fortran':
-            fc = self.env.coredata.compilers['fortran']
+            fc = self.env.coredata.compilers[self.for_machine]['fortran']
             multi_args += fc.get_module_incdir_args()
 
         include_next = False
@@ -273,7 +277,7 @@ class MPIDependency(ExternalDependency):
                 mlog.debug(mlog.bold('Standard output\n'), o)
                 mlog.debug(mlog.bold('Standard error\n'), e)
                 return
-            cargs = shlex.split(o)
+            cargs = split_args(o)
 
             cmd = prog.get_command() + ['--showme:link']
             p, o, e = mesonlib.Popen_safe(cmd)
@@ -283,7 +287,7 @@ class MPIDependency(ExternalDependency):
                 mlog.debug(mlog.bold('Standard output\n'), o)
                 mlog.debug(mlog.bold('Standard error\n'), e)
                 return
-            libs = shlex.split(o)
+            libs = split_args(o)
 
             cmd = prog.get_command() + ['--showme:version']
             p, o, e = mesonlib.Popen_safe(cmd)
@@ -312,7 +316,7 @@ class MPIDependency(ExternalDependency):
                 mlog.debug(mlog.bold('Standard output\n'), o)
                 mlog.debug(mlog.bold('Standard error\n'), e)
                 return
-            args = shlex.split(o)
+            args = split_args(o)
 
             version = None
 
@@ -325,7 +329,7 @@ class MPIDependency(ExternalDependency):
         if 'MSMPI_INC' not in os.environ:
             return
         incdir = os.environ['MSMPI_INC']
-        arch = detect_cpu_family(self.env.coredata.compilers)
+        arch = detect_cpu_family(self.env.coredata.compilers.host)
         if arch == 'x86':
             if 'MSMPI_LIB32' not in os.environ:
                 return
@@ -366,20 +370,30 @@ class OpenMPDependency(ExternalDependency):
         language = kwargs.get('language')
         super().__init__('openmp', environment, language, kwargs)
         self.is_found = False
+        if self.clib_compiler.get_id() == 'pgi':
+            # through at least PGI 19.4, there is no macro defined for OpenMP, but OpenMP 3.1 is supported.
+            self.version = '3.1'
+            self.is_found = True
+            self.compile_args = self.link_args = self.clib_compiler.openmp_flags()
+            return
         try:
             openmp_date = self.clib_compiler.get_define(
                 '_OPENMP', '', self.env, self.clib_compiler.openmp_flags(), [self], disable_cache=True)[0]
         except mesonlib.EnvironmentException as e:
             mlog.debug('OpenMP support not available in the compiler')
             mlog.debug(e)
-            openmp_date = False
+            openmp_date = None
 
         if openmp_date:
             self.version = self.VERSIONS[openmp_date]
-            if self.clib_compiler.has_header('omp.h', '', self.env, dependencies=[self], disable_cache=True)[0]:
-                self.is_found = True
-                self.compile_args = self.link_args = self.clib_compiler.openmp_flags()
-            else:
+            # Flang has omp_lib.h
+            header_names = ('omp.h', 'omp_lib.h')
+            for name in header_names:
+                if self.clib_compiler.has_header(name, '', self.env, dependencies=[self], disable_cache=True)[0]:
+                    self.is_found = True
+                    self.compile_args = self.link_args = self.clib_compiler.openmp_flags()
+                    break
+            if not self.is_found:
                 mlog.log(mlog.yellow('WARNING:'), 'OpenMP found but omp.h missing.')
 
 
@@ -388,15 +402,54 @@ class ThreadDependency(ExternalDependency):
         super().__init__('threads', environment, None, kwargs)
         self.name = 'threads'
         self.is_found = True
-        self.compile_args = self.clib_compiler.thread_flags(environment)
-        self.link_args = self.clib_compiler.thread_link_flags(environment)
+        # Happens if you are using a language with threads
+        # concept without C, such as plain Cuda.
+        if self.clib_compiler is None:
+            self.compile_args = []
+            self.link_args = []
+        else:
+            self.compile_args = self.clib_compiler.thread_flags(environment)
+            self.link_args = self.clib_compiler.thread_link_flags(environment)
+
+
+class BlocksDependency(ExternalDependency):
+    def __init__(self, environment, kwargs):
+        super().__init__('blocks', environment, None, kwargs)
+        self.name = 'blocks'
+        self.is_found = False
+
+        if self.env.machines[self.for_machine].is_darwin():
+            self.compile_args = []
+            self.link_args = []
+        else:
+            self.compile_args = ['-fblocks']
+            self.link_args = ['-lBlocksRuntime']
+
+            if not self.clib_compiler.has_header('Block.h', '', environment, disable_cache=True) or \
+               not self.clib_compiler.find_library('BlocksRuntime', environment, []):
+                mlog.log(mlog.red('ERROR:'), 'BlocksRuntime not found.')
+                return
+
+        source = '''
+            int main(int argc, char **argv)
+            {
+                int (^callback)(void) = ^ int (void) { return 0; };
+                return callback();
+            }'''
+
+        with self.clib_compiler.compile(source, extra_args=self.compile_args + self.link_args) as p:
+            if p.returncode != 0:
+                mlog.log(mlog.red('ERROR:'), 'Compiler does not support blocks extension.')
+                return
+
+            self.is_found = True
 
 
 class Python3Dependency(ExternalDependency):
     def __init__(self, environment, kwargs):
         super().__init__('python3', environment, None, kwargs)
 
-        if self.want_cross:
+        if not environment.machines.matches_build_machine(self.for_machine):
             return
 
         self.name = 'python3'
@@ -480,7 +533,7 @@ class Python3Dependency(ExternalDependency):
         if pyarch is None:
             self.is_found = False
             return
-        arch = detect_cpu_family(env.coredata.compilers)
+        arch = detect_cpu_family(env.coredata.compilers.host)
         if arch == 'x86':
             arch = '32'
         elif arch == 'x86_64':
@@ -560,7 +613,7 @@ class PcapDependency(ExternalDependency):
     def get_pcap_lib_version(ctdep):
         # Since we seem to need to run a program to discover the pcap version,
         # we can't do that when cross-compiling
-        if ctdep.want_cross:
+        if not ctdep.env.machines.matches_build_machine(ctdep.for_machine):
             return None
 
         v = ctdep.clib_compiler.get_return_value('pcap_lib_version', 'string',
@@ -749,7 +802,7 @@ class ShadercDependency(ExternalDependency):
             else:
                 c = [functools.partial(PkgConfigDependency, name, environment, kwargs)
                      for name in shared_libs + static_libs]
-            candidates.exend(c)
+            candidates.extend(c)
 
         if DependencyMethods.SYSTEM in methods:
             candidates.append(functools.partial(ShadercDependency, environment, kwargs))

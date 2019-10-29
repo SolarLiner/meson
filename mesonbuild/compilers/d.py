@@ -13,23 +13,25 @@
 # limitations under the License.
 
 import os.path, subprocess
+import typing
 
 from ..mesonlib import (
-    EnvironmentException, MachineChoice, version_compare, is_windows, is_osx
+    EnvironmentException, MachineChoice, version_compare,
 )
 
 from .compilers import (
-    CompilerType,
     d_dmd_buildtype_args,
     d_gdc_buildtype_args,
     d_ldc_buildtype_args,
-    get_gcc_soname_args,
-    gnu_color_args,
-    gnu_optimization_args,
     clike_debug_args,
     Compiler,
     CompilerArgs,
 )
+from .mixins.gnu import GnuCompiler
+from .mixins.islinker import LinkerEnvVarsMixin, BasicLinkerIsCompilerMixin
+
+if typing.TYPE_CHECKING:
+    from ..envconfig import MachineInfo
 
 d_feature_args = {'gcc':  {'unittest': '-funittest',
                            'debug': '-fdebug',
@@ -64,45 +66,10 @@ dmd_optimization_args = {'0': [],
                          's': ['-O'],
                          }
 
-class DCompiler(Compiler):
-    mscrt_args = {
-        'none': ['-mscrtlib='],
-        'md': ['-mscrtlib=msvcrt'],
-        'mdd': ['-mscrtlib=msvcrtd'],
-        'mt': ['-mscrtlib=libcmt'],
-        'mtd': ['-mscrtlib=libcmtd'],
-    }
 
-    def __init__(self, exelist, version, is_cross, arch, **kwargs):
-        self.language = 'd'
-        super().__init__(exelist, version, **kwargs)
-        self.id = 'unknown'
-        self.is_cross = is_cross
-        self.arch = arch
+class DmdLikeCompilerMixin:
 
-    def sanity_check(self, work_dir, environment):
-        source_name = os.path.join(work_dir, 'sanity.d')
-        output_name = os.path.join(work_dir, 'dtest')
-        with open(source_name, 'w') as ofile:
-            ofile.write('''void main() { }''')
-        pc = subprocess.Popen(self.exelist + self.get_output_args(output_name) + self.get_target_arch_args() + [source_name], cwd=work_dir)
-        pc.wait()
-        if pc.returncode != 0:
-            raise EnvironmentException('D compiler %s can not compile programs.' % self.name_string())
-        if subprocess.call(output_name) != 0:
-            raise EnvironmentException('Executables created by D compiler %s are not runnable.' % self.name_string())
-
-    def needs_static_linker(self):
-        return True
-
-    def name_string(self):
-        return ' '.join(self.exelist)
-
-    def get_exelist(self):
-        return self.exelist
-
-    def get_linker_exelist(self):
-        return self.exelist[:]
+    LINKER_PREFIX = '-L'
 
     def get_output_args(self, target):
         return ['-of=' + target]
@@ -136,11 +103,6 @@ class DCompiler(Compiler):
         # DMD and LDC does not currently return Makefile-compatible dependency info.
         return []
 
-    def get_linker_search_args(self, dirname):
-        # -L is recognized as "add this to the search path" by the linker,
-        # while the compiler recognizes it as "pass to linker".
-        return ['-Wl,-L' + dirname]
-
     def get_coverage_args(self):
         return ['-cov']
 
@@ -157,24 +119,9 @@ class DCompiler(Compiler):
         return 'deps'
 
     def get_pic_args(self):
-        if is_windows():
+        if self.info.is_windows():
             return []
         return ['-fPIC']
-
-    def get_std_shared_lib_link_args(self):
-        return ['-shared']
-
-    def get_soname_args(self, *args):
-        # FIXME: Make this work for cross-compiling
-        if is_windows():
-            return []
-        elif is_osx():
-            soname_args = get_gcc_soname_args(CompilerType.GCC_OSX, *args)
-            if soname_args:
-                return ['-Wl,' + ','.join(soname_args)]
-            return []
-
-        return get_gcc_soname_args(CompilerType.GCC_STANDARD, *args)
 
     def get_feature_args(self, kwargs, build_to_src):
         res = []
@@ -269,8 +216,8 @@ class DCompiler(Compiler):
     def gen_import_library_args(self, implibname):
         return ['-Wl,--out-implib=' + implibname]
 
-    def build_rpath_args(self, build_dir, from_dir, rpath_paths, build_rpath, install_rpath):
-        if is_windows():
+    def build_rpath_args(self, env, build_dir, from_dir, rpath_paths, build_rpath, install_rpath):
+        if self.info.is_windows():
             return []
 
         # This method is to be used by LDC and DMD.
@@ -288,61 +235,7 @@ class DCompiler(Compiler):
                 paths = paths + ':' + padding
         return ['-Wl,-rpath,{}'.format(paths)]
 
-    def _get_compiler_check_args(self, env, extra_args, dependencies, mode='compile'):
-        if callable(extra_args):
-            extra_args = extra_args(mode)
-        if extra_args is None:
-            extra_args = []
-        elif isinstance(extra_args, str):
-            extra_args = [extra_args]
-        if dependencies is None:
-            dependencies = []
-        elif not isinstance(dependencies, list):
-            dependencies = [dependencies]
-        # Collect compiler arguments
-        args = CompilerArgs(self)
-        for d in dependencies:
-            # Add compile flags needed by dependencies
-            args += d.get_compile_args()
-            if mode == 'link':
-                # Add link flags needed to find dependencies
-                args += d.get_link_args()
-
-        if env.is_cross_build() and not self.is_cross:
-            for_machine = MachineChoice.BUILD
-        else:
-            for_machine = MachineChoice.HOST
-
-        if mode == 'compile':
-            # Add DFLAGS from the env
-            args += env.coredata.get_external_args(for_machine, self.language)
-        elif mode == 'link':
-            # Add LDFLAGS from the env
-            args += env.coredata.get_external_link_args(for_machine, self.language)
-        # extra_args must override all other arguments, so we add them last
-        args += extra_args
-        return args
-
-    def compiles(self, code, env, *, extra_args=None, dependencies=None, mode='compile'):
-        args = self._get_compiler_check_args(env, extra_args, dependencies, mode)
-
-        with self.cached_compile(code, env.coredata, extra_args=args, mode=mode) as p:
-            return p.returncode == 0, p.cached
-
-    def has_multi_arguments(self, args, env):
-        return self.compiles('int i;\n', env, extra_args=args)
-
-    def get_target_arch_args(self):
-        # LDC2 on Windows targets to current OS architecture, but
-        # it should follow the target specified by the MSVC toolchain.
-        if is_windows():
-            if self.arch == 'x86_64':
-                return ['-m64']
-            return ['-m32']
-        return []
-
-    @classmethod
-    def translate_args_to_nongnu(cls, args):
+    def translate_args_to_nongnu(self, args):
         dcargs = []
         # Translate common arguments to flags the LDC/DMD compilers
         # can understand.
@@ -351,16 +244,20 @@ class DCompiler(Compiler):
         for arg in args:
             # Translate OS specific arguments first.
             osargs = []
-            if is_windows():
-                osargs = cls.translate_arg_to_windows(arg)
-            elif is_osx():
-                osargs = cls.translate_arg_to_osx(arg)
+            if self.info.is_windows():
+                osargs = self.translate_arg_to_windows(arg)
+            elif self.info.is_darwin():
+                osargs = self.translate_arg_to_osx(arg)
             if osargs:
                 dcargs.extend(osargs)
                 continue
 
             # Translate common D arguments here.
             if arg == '-pthread':
+                continue
+            if arg.startswith('-fstack-protector'):
+                continue
+            if arg.startswith('-D'):
                 continue
             if arg.startswith('-Wl,'):
                 # Translate linker arguments here.
@@ -389,7 +286,14 @@ class DCompiler(Compiler):
                 if arg.startswith('-isystem='):
                     dcargs.append('-I=' + arg[9:])
                 else:
-                    dcargs.append('-I')
+                    dcargs.append('-I' + arg[8:])
+                continue
+            elif arg.startswith('-idirafter'):
+                # same as -isystem, but appends the path instead
+                if arg.startswith('-idirafter='):
+                    dcargs.append('-I=' + arg[11:])
+                else:
+                    dcargs.append('-I' + arg[10:])
                 continue
             elif arg.startswith('-L/') or arg.startswith('-L./'):
                 # we need to handle cases where -L is set by e.g. a pkg-config
@@ -462,7 +366,7 @@ class DCompiler(Compiler):
         return clike_debug_args[is_debug] + ddebug_args
 
     def get_crt_args(self, crt_val, buildtype):
-        if not is_windows():
+        if not self.info.is_windows():
             return []
 
         if crt_val in self.mscrt_args:
@@ -484,6 +388,198 @@ class DCompiler(Compiler):
             assert(buildtype == 'custom')
             raise EnvironmentException('Requested C runtime based on buildtype, but buildtype is "custom".')
 
+    def get_soname_args(self, *args, **kwargs) -> typing.List[str]:
+        # LDC and DMD actually do use a linker, but they proxy all of that with
+        # their own arguments
+        return Compiler.get_soname_args(self, *args, **kwargs)
+
+    def get_allow_undefined_link_args(self) -> typing.List[str]:
+        args = []
+        for arg in self.linker.get_allow_undefined_args():
+            args.append('-L=' + arg)
+        return args
+
+
+class DCompiler(Compiler):
+    mscrt_args = {
+        'none': ['-mscrtlib='],
+        'md': ['-mscrtlib=msvcrt'],
+        'mdd': ['-mscrtlib=msvcrtd'],
+        'mt': ['-mscrtlib=libcmt'],
+        'mtd': ['-mscrtlib=libcmtd'],
+    }
+
+    def __init__(self, exelist, version, for_machine: MachineChoice,
+                 info: 'MachineInfo', arch, **kwargs):
+        self.language = 'd'
+        super().__init__(exelist, version, for_machine, info, **kwargs)
+        self.id = 'unknown'
+        self.arch = arch
+
+    def sanity_check(self, work_dir, environment):
+        source_name = os.path.join(work_dir, 'sanity.d')
+        output_name = os.path.join(work_dir, 'dtest')
+        with open(source_name, 'w') as ofile:
+            ofile.write('''void main() { }''')
+        pc = subprocess.Popen(self.exelist + self.get_output_args(output_name) + self.get_target_arch_args() + [source_name], cwd=work_dir)
+        pc.wait()
+        if pc.returncode != 0:
+            raise EnvironmentException('D compiler %s can not compile programs.' % self.name_string())
+        if subprocess.call(output_name) != 0:
+            raise EnvironmentException('Executables created by D compiler %s are not runnable.' % self.name_string())
+
+    def needs_static_linker(self):
+        return True
+
+    def depfile_for_object(self, objfile):
+        return objfile + '.' + self.get_depfile_suffix()
+
+    def get_depfile_suffix(self):
+        return 'deps'
+
+    def get_pic_args(self):
+        if self.info.is_windows():
+            return []
+        return ['-fPIC']
+
+    def get_feature_args(self, kwargs, build_to_src):
+        res = []
+        if 'unittest' in kwargs:
+            unittest = kwargs.pop('unittest')
+            unittest_arg = d_feature_args[self.id]['unittest']
+            if not unittest_arg:
+                raise EnvironmentException('D compiler %s does not support the "unittest" feature.' % self.name_string())
+            if unittest:
+                res.append(unittest_arg)
+
+        if 'debug' in kwargs:
+            debug_level = -1
+            debugs = kwargs.pop('debug')
+            if not isinstance(debugs, list):
+                debugs = [debugs]
+
+            debug_arg = d_feature_args[self.id]['debug']
+            if not debug_arg:
+                raise EnvironmentException('D compiler %s does not support conditional debug identifiers.' % self.name_string())
+
+            # Parse all debug identifiers and the largest debug level identifier
+            for d in debugs:
+                if isinstance(d, int):
+                    if d > debug_level:
+                        debug_level = d
+                elif isinstance(d, str) and d.isdigit():
+                    if int(d) > debug_level:
+                        debug_level = int(d)
+                else:
+                    res.append('{0}={1}'.format(debug_arg, d))
+
+            if debug_level >= 0:
+                res.append('{0}={1}'.format(debug_arg, debug_level))
+
+        if 'versions' in kwargs:
+            version_level = -1
+            versions = kwargs.pop('versions')
+            if not isinstance(versions, list):
+                versions = [versions]
+
+            version_arg = d_feature_args[self.id]['version']
+            if not version_arg:
+                raise EnvironmentException('D compiler %s does not support conditional version identifiers.' % self.name_string())
+
+            # Parse all version identifiers and the largest version level identifier
+            for v in versions:
+                if isinstance(v, int):
+                    if v > version_level:
+                        version_level = v
+                elif isinstance(v, str) and v.isdigit():
+                    if int(v) > version_level:
+                        version_level = int(v)
+                else:
+                    res.append('{0}={1}'.format(version_arg, v))
+
+            if version_level >= 0:
+                res.append('{0}={1}'.format(version_arg, version_level))
+
+        if 'import_dirs' in kwargs:
+            import_dirs = kwargs.pop('import_dirs')
+            if not isinstance(import_dirs, list):
+                import_dirs = [import_dirs]
+
+            import_dir_arg = d_feature_args[self.id]['import_dir']
+            if not import_dir_arg:
+                raise EnvironmentException('D compiler %s does not support the "string import directories" feature.' % self.name_string())
+            for idir_obj in import_dirs:
+                basedir = idir_obj.get_curdir()
+                for idir in idir_obj.get_incdirs():
+                    # Avoid superfluous '/.' at the end of paths when d is '.'
+                    if idir not in ('', '.'):
+                        expdir = os.path.join(basedir, idir)
+                    else:
+                        expdir = basedir
+                    srctreedir = os.path.join(build_to_src, expdir)
+                    res.append('{0}{1}'.format(import_dir_arg, srctreedir))
+
+        if kwargs:
+            raise EnvironmentException('Unknown D compiler feature(s) selected: %s' % ', '.join(kwargs.keys()))
+
+        return res
+
+    def get_buildtype_linker_args(self, buildtype):
+        if buildtype != 'plain':
+            return self.get_target_arch_args()
+        return []
+
+    def get_std_exe_link_args(self):
+        return []
+
+    def _get_compiler_check_args(self, env, extra_args, dependencies, mode='compile'):
+        if callable(extra_args):
+            extra_args = extra_args(mode)
+        if extra_args is None:
+            extra_args = []
+        elif isinstance(extra_args, str):
+            extra_args = [extra_args]
+        if dependencies is None:
+            dependencies = []
+        elif not isinstance(dependencies, list):
+            dependencies = [dependencies]
+        # Collect compiler arguments
+        args = CompilerArgs(self)
+        for d in dependencies:
+            # Add compile flags needed by dependencies
+            args += d.get_compile_args()
+            if mode == 'link':
+                # Add link flags needed to find dependencies
+                args += d.get_link_args()
+
+        if mode == 'compile':
+            # Add DFLAGS from the env
+            args += env.coredata.get_external_args(self.for_machine, self.language)
+        elif mode == 'link':
+            # Add LDFLAGS from the env
+            args += env.coredata.get_external_link_args(self.for_machine, self.language)
+        # extra_args must override all other arguments, so we add them last
+        args += extra_args
+        return args
+
+    def compiles(self, code, env, *, extra_args=None, dependencies=None, mode='compile'):
+        args = self._get_compiler_check_args(env, extra_args, dependencies, mode)
+
+        with self.cached_compile(code, env.coredata, extra_args=args, mode=mode) as p:
+            return p.returncode == 0, p.cached
+
+    def has_multi_arguments(self, args, env):
+        return self.compiles('int i;\n', env, extra_args=args)
+
+    def get_target_arch_args(self):
+        # LDC2 on Windows targets to current OS architecture, but
+        # it should follow the target specified by the MSVC toolchain.
+        if self.info.is_windows():
+            if self.arch == 'x86_64':
+                return ['-m64']
+            return ['-m32']
+        return []
+
     def get_crt_compile_args(self, crt_val, buildtype):
         return []
 
@@ -493,9 +589,18 @@ class DCompiler(Compiler):
     def thread_link_flags(self, env):
         return ['-pthread']
 
-class GnuDCompiler(DCompiler):
-    def __init__(self, exelist, version, is_cross, arch, **kwargs):
-        DCompiler.__init__(self, exelist, version, is_cross, arch, **kwargs)
+    def name_string(self):
+        return ' '.join(self.exelist)
+
+
+class GnuDCompiler(DCompiler, GnuCompiler):
+
+    # we mostly want DCompiler, but that gives us the Compiler.LINKER_PREFIX instead
+    LINKER_PREFIX = GnuCompiler.LINKER_PREFIX
+
+    def __init__(self, exelist, version, for_machine: MachineChoice,
+                 info: 'MachineInfo', arch, **kwargs):
+        DCompiler.__init__(self, exelist, version, for_machine, info, arch, **kwargs)
         self.id = 'gcc'
         default_warn_args = ['-Wall', '-Wdeprecated']
         self.warn_args = {'0': [],
@@ -511,31 +616,16 @@ class GnuDCompiler(DCompiler):
 
     def get_colorout_args(self, colortype):
         if self._has_color_support:
-            return gnu_color_args[colortype][:]
+            super().get_colorout_args(colortype)
         return []
 
     def get_dependency_gen_args(self, outtarget, outfile):
-        if not self._has_deps_support:
-            return []
-        return ['-MD', '-MQ', outtarget, '-MF', outfile]
-
-    def get_output_args(self, target):
-        return ['-o', target]
-
-    def get_linker_output_args(self, target):
-        return ['-o', target]
-
-    def get_include_args(self, path, is_system):
-        return ['-I' + path]
+        if self._has_deps_support:
+            return super().get_dependency_gen_args(outtarget, outfile)
+        return []
 
     def get_warn_args(self, level):
         return self.warn_args[level]
-
-    def get_werror_args(self):
-        return ['-Werror']
-
-    def get_linker_search_args(self, dirname):
-        return ['-L' + dirname]
 
     def get_coverage_args(self):
         return []
@@ -550,15 +640,15 @@ class GnuDCompiler(DCompiler):
 
         return parameter_list
 
-    def build_rpath_args(self, build_dir, from_dir, rpath_paths, build_rpath, install_rpath):
-        return self.build_unix_rpath_args(build_dir, from_dir, rpath_paths, build_rpath, install_rpath)
+    def get_allow_undefined_link_args(self) -> typing.List[str]:
+        return self.linker.get_allow_undefined_args()
 
-    def get_optimization_args(self, optimization_level):
-        return gnu_optimization_args[optimization_level]
 
-class LLVMDCompiler(DCompiler):
-    def __init__(self, exelist, version, is_cross, arch, **kwargs):
-        DCompiler.__init__(self, exelist, version, is_cross, arch, **kwargs)
+class LLVMDCompiler(DmdLikeCompilerMixin, LinkerEnvVarsMixin, BasicLinkerIsCompilerMixin, DCompiler):
+
+    def __init__(self, exelist, version, for_machine: MachineChoice,
+                 info: 'MachineInfo', arch, **kwargs):
+        DCompiler.__init__(self, exelist, version, for_machine, info, arch, **kwargs)
         self.id = 'llvm'
         self.base_options = ['b_coverage', 'b_colorout', 'b_vscrt']
 
@@ -583,20 +673,24 @@ class LLVMDCompiler(DCompiler):
     def get_pic_args(self):
         return ['-relocation-model=pic']
 
+    def get_std_shared_lib_link_args(self):
+        return ['-shared']
+
     def get_crt_link_args(self, crt_val, buildtype):
         return self.get_crt_args(crt_val, buildtype)
 
-    @classmethod
-    def unix_args_to_native(cls, args):
-        return cls.translate_args_to_nongnu(args)
+    def unix_args_to_native(self, args):
+        return self.translate_args_to_nongnu(args)
 
     def get_optimization_args(self, optimization_level):
         return ldc_optimization_args[optimization_level]
 
 
-class DmdDCompiler(DCompiler):
-    def __init__(self, exelist, version, is_cross, arch, **kwargs):
-        DCompiler.__init__(self, exelist, version, is_cross, arch, **kwargs)
+class DmdDCompiler(DmdLikeCompilerMixin, LinkerEnvVarsMixin, BasicLinkerIsCompilerMixin, DCompiler):
+
+    def __init__(self, exelist, version, for_machine: MachineChoice,
+                 info: 'MachineInfo', arch, **kwargs):
+        DCompiler.__init__(self, exelist, version, for_machine, info, arch, **kwargs)
         self.id = 'dmd'
         self.base_options = ['b_coverage', 'b_colorout', 'b_vscrt']
 
@@ -611,7 +705,7 @@ class DmdDCompiler(DCompiler):
         return d_dmd_buildtype_args[buildtype]
 
     def get_std_exe_link_args(self):
-        if is_windows():
+        if self.info.is_windows():
             # DMD links against D runtime only when main symbol is found,
             # so these needs to be inserted when linking static D libraries.
             if self.arch == 'x86_64':
@@ -623,7 +717,7 @@ class DmdDCompiler(DCompiler):
 
     def get_std_shared_lib_link_args(self):
         libname = 'libphobos2.so'
-        if is_windows():
+        if self.info.is_windows():
             if self.arch == 'x86_64':
                 libname = 'phobos64.lib'
             elif self.arch == 'x86_mscoff':
@@ -636,7 +730,7 @@ class DmdDCompiler(DCompiler):
         # DMD32 and DMD64 on 64-bit Windows defaults to 32-bit (OMF).
         # Force the target to 64-bit in order to stay consistent
         # across the different platforms.
-        if is_windows():
+        if self.info.is_windows():
             if self.arch == 'x86_64':
                 return ['-m64']
             elif self.arch == 'x86_mscoff':
@@ -647,9 +741,8 @@ class DmdDCompiler(DCompiler):
     def get_crt_compile_args(self, crt_val, buildtype):
         return self.get_crt_args(crt_val, buildtype)
 
-    @classmethod
-    def unix_args_to_native(cls, args):
-        return cls.translate_args_to_nongnu(args)
+    def unix_args_to_native(self, args):
+        return self.translate_args_to_nongnu(args)
 
     def get_optimization_args(self, optimization_level):
         return dmd_optimization_args[optimization_level]

@@ -634,7 +634,7 @@ class XCodeBackend(backends.Backend):
             self.write_line('isa = XCBuildConfiguration;')
             self.write_line('buildSettings = {')
             self.indent_level += 1
-            self.write_line('ARCHS = "$(ARCHS_STANDARD_32_64_BIT)";')
+            self.write_line('ARCHS = "$(ARCHS_STANDARD_64_BIT)";')
             self.write_line('ONLY_ACTIVE_ARCH = YES;')
             self.write_line('SDKROOT = "macosx";')
             self.write_line('SYMROOT = "%s/build";' % self.environment.get_build_dir())
@@ -738,14 +738,14 @@ class XCodeBackend(backends.Backend):
                 ldstr = ' '.join(ldargs)
                 valid = self.buildconfmap[target_name][buildtype]
                 langargs = {}
-                for lang in self.environment.coredata.compilers:
+                for lang in self.environment.coredata.compilers[target.for_machine]:
                     if lang not in langnamemap:
                         continue
                     # Add compile args added using add_project_arguments()
-                    pargs = self.build.projects_args.get(target.subproject, {}).get(lang, [])
+                    pargs = self.build.projects_args[target.for_machine].get(target.subproject, {}).get(lang, [])
                     # Add compile args added using add_global_arguments()
                     # These override per-project arguments
-                    gargs = self.build.global_args.get(lang, [])
+                    gargs = self.build.global_args[target.for_machine].get(lang, [])
                     targs = target.get_extra_args(lang)
                     args = pargs + gargs + targs
                     if args:

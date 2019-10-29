@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import configparser, os, shlex, subprocess
+import configparser, os, subprocess
 import typing
 
 from . import mesonlib
-from .mesonlib import EnvironmentException
+from .mesonlib import EnvironmentException, split_args
 from . import mlog
 
 _T = typing.TypeVar('_T')
@@ -37,10 +37,12 @@ _T = typing.TypeVar('_T')
 
 known_cpu_families = (
     'aarch64',
+    'alpha',
     'arc',
     'arm',
     'e2k',
     'ia64',
+    'microblaze',
     'mips',
     'mips64',
     'parisc',
@@ -53,6 +55,8 @@ known_cpu_families = (
     's390x',
     'sparc',
     'sparc64',
+    'wasm32',
+    'wasm64',
     'x86',
     'x86_64'
 )
@@ -61,11 +65,13 @@ known_cpu_families = (
 # python identifiers cannot start with numbers
 CPU_FAMILES_64_BIT = [
     'aarch64',
+    'alpha',
     'ia64',
     'mips64',
     'ppc64',
     'riscv64',
     'sparc64',
+    'wasm64',
     'x86_64',
 ]
 
@@ -198,13 +204,13 @@ class MachineInfo:
         """
         Machine is windows?
         """
-        return self.system in {'windows', 'mingw'}
+        return self.system == 'windows' or 'mingw' in self.system
 
     def is_cygwin(self) -> bool:
         """
         Machine is cygwin?
         """
-        return self.system == 'cygwin'
+        return self.system.startswith('cygwin')
 
     def is_linux(self) -> bool:
         """
@@ -214,9 +220,9 @@ class MachineInfo:
 
     def is_darwin(self) -> bool:
         """
-        Machine is Darwin (iOS/OS X)?
+        Machine is Darwin (iOS/tvOS/OS X)?
         """
-        return self.system in {'darwin', 'ios'}
+        return self.system in {'darwin', 'ios', 'tvos'}
 
     def is_android(self) -> bool:
         """
@@ -230,16 +236,33 @@ class MachineInfo:
         """
         return self.system == 'haiku'
 
+    def is_netbsd(self) -> bool:
+        """
+        Machine is NetBSD?
+        """
+        return self.system == 'netbsd'
+
     def is_openbsd(self) -> bool:
         """
         Machine is OpenBSD?
         """
         return self.system == 'openbsd'
 
+    def is_dragonflybsd(self) -> bool:
+        """Machine is DragonflyBSD?"""
+        return self.system == 'dragonfly'
+
+    def is_freebsd(self) -> bool:
+        """Machine is FreeBSD?"""
+        return self.system == 'freebsd'
+
+    def is_sunos(self) -> bool:
+        """Machine is illumos or Solaris?"""
+        return self.system == 'sunos'
+
     # Various prefixes and suffixes for import libraries, shared libraries,
     # static libraries, and executables.
     # Versioning is added to these names in the backends as-needed.
-
     def get_exe_suffix(self) -> str:
         if self.is_windows() or self.is_cygwin():
             return 'exe'
@@ -339,7 +362,11 @@ This is probably wrong, it should always point to the native compiler.''' % evar
             evar = self.evarMap.get(name, "")
             command = os.environ.get(evar)
             if command is not None:
-                command = shlex.split(command)
+                command = split_args(command)
+
+        # Do not return empty or blank string entries
+        if command is not None and (len(command) == 0 or len(command[0].strip()) == 0):
+            return None
         return command
 
 class Directories:

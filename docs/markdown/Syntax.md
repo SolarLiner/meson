@@ -78,6 +78,13 @@ string_var = '42'
 num = string_var.to_int()
 ```
 
+Numbers can be converted to a string:
+
+```meson
+int_var = 42
+string_var = int_var.to_string()
+```
+
 Booleans
 --
 
@@ -214,12 +221,12 @@ pathsep = ':'
 path = pathsep.join(['/usr/bin', '/bin', '/usr/local/bin'])
 # path now has the value '/usr/bin:/bin:/usr/local/bin'
 
-# For joining paths, you should use join_paths()
+# For joining path elements, you should use path1 / path2
 # This has the advantage of being cross-platform
-path = join_paths(['/usr', 'local', 'bin'])
+path = '/usr' / 'local' / 'bin'
 # path now has the value '/usr/local/bin'
 
-# Don't use join_paths for sources files, use files for that:
+# For sources files, use files():
 my_sources = files('foo.c')
 ...
 my_sources += files('bar.c')
@@ -331,7 +338,7 @@ Keys must be unique:
 my_dict = {'foo': 42, 'foo': 43}
 ```
 
-Dictionaries are immutable.
+Dictionaries are immutable and do not have a guaranteed order.
 
 Dictionaries are available since 0.47.0.
 
@@ -340,7 +347,7 @@ about the methods exposed by dictionaries.
 
 Since 0.49.0, you can check if a dictionary contains a key like this:
 ```meson
-my_dict = {'foo': 42, 'foo': 43}
+my_dict = {'foo': 42, 'bar': 43}
 if 'foo' in my_dict
 # This condition is true
 endif

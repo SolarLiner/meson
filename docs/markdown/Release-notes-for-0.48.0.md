@@ -29,7 +29,7 @@ manually changed with the new base option `b_vscrt`.
 
 ## Meson warns if two calls to `configure_file()` write to the same file
 
-If two calls to [`configure_file()`](#Reference-manual.md#configure_file)
+If two calls to [`configure_file()`](Reference-manual.md#configure_file)
 write to the same file Meson will print a `WARNING:` message during
 configuration. For example:
 ```meson
@@ -217,7 +217,7 @@ i18n.merge_file() now behaves as custom_target() in this regard.
 ## Projects args can be set separately for cross and native builds (potentially breaking change)
 
 It has been a longstanding bug (or let's call it a "delayed bug fix")
-that if yo do this:
+that if you do this:
 
 ```meson
 add_project_arguments('-DFOO', language : 'c')

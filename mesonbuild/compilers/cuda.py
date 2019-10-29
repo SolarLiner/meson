@@ -12,27 +12,49 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import re, os.path
+import os.path
+import typing
+from functools import partial
 
+from .. import coredata
 from .. import mlog
-from ..mesonlib import EnvironmentException, Popen_safe
+from ..mesonlib import EnvironmentException, MachineChoice, Popen_safe, OptionOverrideProxy, is_windows
 from .compilers import (Compiler, cuda_buildtype_args, cuda_optimization_args,
-                        cuda_debug_args, CompilerType, get_gcc_soname_args)
+                        cuda_debug_args)
+
+if typing.TYPE_CHECKING:
+    from ..environment import Environment  # noqa: F401
+    from ..envconfig import MachineInfo
+
 
 class CudaCompiler(Compiler):
-    def __init__(self, exelist, version, is_cross, exe_wrapper=None):
+
+    LINKER_PREFIX = '-Xlinker='
+
+    _universal_flags = {'compiler': ['-I', '-D', '-U', '-E'], 'linker': ['-l', '-L']}
+
+    def __init__(self, exelist, version, for_machine: MachineChoice,
+                 is_cross, exe_wrapper, host_compiler, info: 'MachineInfo', **kwargs):
         if not hasattr(self, 'language'):
             self.language = 'cuda'
-        super().__init__(exelist, version)
+        super().__init__(exelist, version, for_machine, info, **kwargs)
         self.is_cross = is_cross
         self.exe_wrapper = exe_wrapper
+        self.host_compiler = host_compiler
+        self.base_options = host_compiler.base_options
         self.id = 'nvcc'
-        default_warn_args = []
-        self.warn_args = {'0': [],
-                          '1': default_warn_args,
-                          '2': default_warn_args + ['-Xcompiler=-Wextra'],
-                          '3': default_warn_args + ['-Xcompiler=-Wextra',
-                                                    '-Xcompiler=-Wpedantic']}
+        self.warn_args = {level: self._to_host_flags(flags) for level, flags in host_compiler.warn_args.items()}
+
+    @classmethod
+    def _to_host_flags(cls, flags, phase='compiler'):
+        return list(map(partial(cls._to_host_flag, phase=phase), flags))
+
+    @classmethod
+    def _to_host_flag(cls, flag, phase):
+        if not flag[0] in ['-', '/'] or flag[:2] in cls._universal_flags[phase]:
+            return flag
+
+        return '-X{}={}'.format(phase, flag)
 
     def needs_static_linker(self):
         return False
@@ -47,7 +69,7 @@ class CudaCompiler(Compiler):
         return []
 
     def thread_link_flags(self, environment):
-        return ['-Xcompiler=-pthread']
+        return self._to_host_flags(self.host_compiler.thread_link_flags(environment))
 
     def sanity_check(self, work_dir, environment):
         mlog.debug('Sanity testing ' + self.get_display_language() + ' compiler:', ' '.join(self.exelist))
@@ -142,9 +164,6 @@ class CudaCompiler(Compiler):
         else:
             mlog.debug('cudaGetDeviceCount() returned ' + stde)
 
-    def get_compiler_check_args(self):
-        return super().get_compiler_check_args() + []
-
     def has_header_symbol(self, hname, symbol, prefix, env, extra_args=None, dependencies=None):
         result, cached = super().has_header_symbol(hname, symbol, prefix, env, extra_args, dependencies)
         if result:
@@ -158,23 +177,48 @@ class CudaCompiler(Compiler):
         int main () {{ return 0; }}'''
         return self.compiles(t.format(**fargs), env, extra_args, dependencies)
 
-    @staticmethod
-    def _cook_link_args(args):
-        """
-        Converts GNU-style arguments -Wl,-arg,-arg
-        to NVCC-style arguments -Xlinker=-arg,-arg
-        """
-        return [re.sub('^-Wl,', '-Xlinker=', arg) for arg in args]
+    def get_options(self):
+        opts = super().get_options()
+        opts.update({'cuda_std': coredata.UserComboOption('C++ language standard to use',
+                                                          ['none', 'c++03', 'c++11', 'c++14'],
+                                                          'none')})
+        return opts
 
-    def get_output_args(self, target):
-        return ['-o', target]
+    def _to_host_compiler_options(self, options):
+        overrides = {name: opt.value for name, opt in options.copy().items()}
+        return OptionOverrideProxy(overrides, self.host_compiler.get_options())
+
+    def get_option_compile_args(self, options):
+        args = []
+        # On Windows, the version of the C++ standard used by nvcc is dictated by
+        # the combination of CUDA version and MSVC verion; the --std= is thus ignored
+        # and attempting to use it will result in a warning: https://stackoverflow.com/a/51272091/741027
+        if not is_windows():
+            std = options['cuda_std']
+            if std.value != 'none':
+                args.append('--std=' + std.value)
+
+        return args + self._to_host_flags(self.host_compiler.get_option_compile_args(self._to_host_compiler_options(options)))
+
+    @classmethod
+    def _cook_link_args(cls, args: typing.List[str]) -> typing.List[str]:
+        # Prepare link args for nvcc
+        cooked = []  # type: typing.List[str]
+        for arg in args:
+            if arg.startswith('-Wl,'): # strip GNU-style -Wl prefix
+                arg = arg.replace('-Wl,', '', 1)
+            arg = arg.replace(' ', '\\') # espace whitespace
+            cooked.append(arg)
+        return cls._to_host_flags(cooked, 'linker')
+
+    def get_option_link_args(self, options):
+        return self._cook_link_args(self.host_compiler.get_option_link_args(self._to_host_compiler_options(options)))
 
     def name_string(self):
         return ' '.join(self.exelist)
 
     def get_soname_args(self, *args):
-        rawargs = get_gcc_soname_args(CompilerType.GCC_STANDARD, *args)
-        return self._cook_link_args(rawargs)
+        return self._cook_link_args(self.host_compiler.get_soname_args(*args))
 
     def get_dependency_gen_args(self, outtarget, outfile):
         return []
@@ -186,6 +230,9 @@ class CudaCompiler(Compiler):
         return ['-O0']
 
     def get_optimization_args(self, optimization_level):
+        # alternatively, consider simply redirecting this to the host compiler, which would
+        # give us more control over options like "optimize for space" (which nvcc doesn't support):
+        # return self._to_host_flags(self.host_compiler.get_optimization_args(optimization_level))
         return cuda_optimization_args[optimization_level]
 
     def get_debug_args(self, is_debug):
@@ -194,25 +241,25 @@ class CudaCompiler(Compiler):
     def get_werror_args(self):
         return ['-Werror=cross-execution-space-call,deprecated-declarations,reorder']
 
-    def get_linker_exelist(self):
-        return self.exelist[:]
-
-    def get_linker_output_args(self, outputname):
-        return ['-o', outputname]
-
     def get_warn_args(self, level):
         return self.warn_args[level]
 
     def get_buildtype_args(self, buildtype):
-        return cuda_buildtype_args[buildtype]
+        # nvcc doesn't support msvc's "Edit and Continue" PDB format; "downgrade" to
+        # a regular PDB to avoid cl's warning to that effect (D9025 : overriding '/ZI' with '/Zi')
+        host_args = ['/Zi' if arg == '/ZI' else arg for arg in self.host_compiler.get_buildtype_args(buildtype)]
+        return cuda_buildtype_args[buildtype] + self._to_host_flags(host_args)
 
     def get_include_args(self, path, is_system):
         if path == '':
             path = '.'
         return ['-I' + path]
 
-    def get_std_shared_lib_link_args(self):
-        return ['-shared']
+    def get_compile_debugfile_args(self, rel_obj, **kwargs):
+        return self._to_host_flags(self.host_compiler.get_compile_debugfile_args(rel_obj, **kwargs))
+
+    def get_link_debugfile_args(self, targetfile):
+        return self._cook_link_args(self.host_compiler.get_link_debugfile_args(targetfile))
 
     def depfile_for_object(self, objfile):
         return objfile + '.' + self.get_depfile_suffix()
@@ -220,24 +267,50 @@ class CudaCompiler(Compiler):
     def get_depfile_suffix(self):
         return 'd'
 
+    def get_linker_debug_crt_args(self) -> typing.List[str]:
+        return self._cook_link_args(self.host_compiler.get_linker_debug_crt_args())
+
     def get_buildtype_linker_args(self, buildtype):
-        return []
+        return self._cook_link_args(self.host_compiler.get_buildtype_linker_args(buildtype))
 
-    def get_std_exe_link_args(self):
-        return []
-
-    def build_rpath_args(self, build_dir, from_dir, rpath_paths, build_rpath, install_rpath):
-        rawargs = self.build_unix_rpath_args(build_dir, from_dir, rpath_paths, build_rpath, install_rpath)
-        return self._cook_link_args(rawargs)
-
-    def get_linker_search_args(self, dirname):
-        return ['-L' + dirname]
+    def build_rpath_args(self, env: 'Environment', build_dir: str, from_dir: str,
+                         rpath_paths: str, build_rpath: str,
+                         install_rpath: str) -> typing.List[str]:
+        return self._cook_link_args(self.host_compiler.build_rpath_args(
+            env, build_dir, from_dir, rpath_paths, build_rpath, install_rpath))
 
     def linker_to_compiler_args(self, args):
         return args
 
     def get_pic_args(self):
-        return ['-Xcompiler=-fPIC']
+        return self._to_host_flags(self.host_compiler.get_pic_args())
 
     def compute_parameters_with_absolute_paths(self, parameter_list, build_dir):
         return []
+
+    def get_output_args(self, target: str) -> typing.List[str]:
+        return ['-o', target]
+
+    def get_std_exe_link_args(self) -> typing.List[str]:
+        return self._cook_link_args(self.host_compiler.get_std_exe_link_args())
+
+    def get_crt_compile_args(self, crt_val, buildtype):
+        return self._to_host_flags(self.host_compiler.get_crt_compile_args(crt_val, buildtype))
+
+    def get_crt_link_args(self, crt_val, buildtype):
+        # nvcc defaults to static, release version of msvc runtime and provides no
+        # native option to override it; override it with /NODEFAULTLIB
+        host_link_arg_overrides = []
+        host_crt_compile_args = self.host_compiler.get_crt_compile_args(crt_val, buildtype)
+        if any(arg in ['/MDd', '/MD', '/MTd'] for arg in host_crt_compile_args):
+            host_link_arg_overrides += ['/NODEFAULTLIB:LIBCMT.lib']
+        return self._cook_link_args(host_link_arg_overrides + self.host_compiler.get_crt_link_args(crt_val, buildtype))
+
+    def get_target_link_args(self, target):
+        return self._cook_link_args(super().get_target_link_args(target))
+
+    def get_dependency_compile_args(self, dep):
+        return self._to_host_flags(super().get_dependency_compile_args(dep))
+
+    def get_dependency_link_args(self, dep):
+        return self._cook_link_args(super().get_dependency_link_args(dep))

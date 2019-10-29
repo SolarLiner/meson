@@ -14,7 +14,6 @@
 
 # Public symbols for compilers sub-package when using 'from . import compilers'
 __all__ = [
-    'CompilerType',
     'Compiler',
 
     'all_languages',
@@ -23,7 +22,6 @@ __all__ = [
     'clink_langs',
     'c_suffixes',
     'cpp_suffixes',
-    'get_macos_dylib_install_name',
     'get_base_compile_args',
     'get_base_link_args',
     'is_assembly',
@@ -33,9 +31,10 @@ __all__ = [
     'is_object',
     'is_source',
     'lang_suffixes',
-    'sanitizer_compile_args',
     'sort_clink',
 
+    'AppleClangCCompiler',
+    'AppleClangCPPCompiler',
     'ArmCCompiler',
     'ArmCPPCompiler',
     'ArmclangCCompiler',
@@ -56,9 +55,11 @@ __all__ = [
     'G95FortranCompiler',
     'GnuCCompiler',
     'ElbrusCCompiler',
+    'EmscriptenCCompiler',
     'GnuCompiler',
     'GnuCPPCompiler',
     'ElbrusCPPCompiler',
+    'EmscriptenCPPCompiler',
     'GnuDCompiler',
     'GnuFortranCompiler',
     'ElbrusFortranCompiler',
@@ -88,7 +89,6 @@ __all__ = [
     'PGIFortranCompiler',
     'RustCompiler',
     'CcrxCCompiler',
-    'CcrxCompiler',
     'CcrxCPPCompiler',
     'SunFortranCompiler',
     'SwiftCompiler',
@@ -100,7 +100,6 @@ __all__ = [
 
 # Bring symbols from each module into compilers sub-package namespace
 from .compilers import (
-    CompilerType,
     Compiler,
     all_languages,
     base_options,
@@ -108,7 +107,6 @@ from .compilers import (
     clink_langs,
     c_suffixes,
     cpp_suffixes,
-    get_macos_dylib_install_name,
     get_base_compile_args,
     get_base_link_args,
     is_header,
@@ -118,24 +116,19 @@ from .compilers import (
     is_object,
     is_library,
     lang_suffixes,
-    sanitizer_compile_args,
     sort_clink,
-    ClangCompiler,
     CompilerArgs,
-    GnuCompiler,
-    IntelGnuLikeCompiler,
-    CcrxCompiler,
-    VisualStudioLikeCompiler,
-    IntelVisualStudioLikeCompiler,
 )
 from .c import (
     CCompiler,
+    AppleClangCCompiler,
     ArmCCompiler,
     ArmclangCCompiler,
     ClangCCompiler,
     ClangClCCompiler,
     GnuCCompiler,
     ElbrusCCompiler,
+    EmscriptenCCompiler,
     IntelCCompiler,
     IntelClCCompiler,
     PGICCompiler,
@@ -144,12 +137,14 @@ from .c import (
 )
 from .cpp import (
     CPPCompiler,
+    AppleClangCPPCompiler,
     ArmCPPCompiler,
     ArmclangCPPCompiler,
     ClangCPPCompiler,
     ClangClCPPCompiler,
     GnuCPPCompiler,
     ElbrusCPPCompiler,
+    EmscriptenCPPCompiler,
     IntelCPPCompiler,
     IntelClCPPCompiler,
     PGICPPCompiler,
@@ -192,3 +187,7 @@ from .objcpp import (
 from .rust import RustCompiler
 from .swift import SwiftCompiler
 from .vala import ValaCompiler
+from .mixins.visualstudio import VisualStudioLikeCompiler
+from .mixins.gnu import GnuCompiler
+from .mixins.intel import IntelGnuLikeCompiler, IntelVisualStudioLikeCompiler
+from .mixins.clang import ClangCompiler

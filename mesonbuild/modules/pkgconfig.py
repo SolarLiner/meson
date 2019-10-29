@@ -91,6 +91,8 @@ class DependenciesHelper:
                 self.add_version_reqs(name, version_req)
             elif isinstance(obj, dependencies.Dependency) and not obj.found():
                 pass
+            elif isinstance(obj, dependencies.ThreadDependency):
+                pass
             else:
                 raise mesonlib.MesonException('requires argument not a string, '
                                               'library with pkgconfig-generated file '
@@ -146,10 +148,10 @@ class DependenciesHelper:
             elif isinstance(obj, (build.SharedLibrary, build.StaticLibrary)):
                 processed_libs.append(obj)
                 if isinstance(obj, build.StaticLibrary) and public:
-                    self.add_pub_libs(obj.get_dependencies(internal=False))
+                    self.add_pub_libs(obj.get_dependencies(for_pkgconfig=True))
                     self.add_pub_libs(obj.get_external_deps())
                 else:
-                    self.add_priv_libs(obj.get_dependencies(internal=False))
+                    self.add_priv_libs(obj.get_dependencies(for_pkgconfig=True))
                     self.add_priv_libs(obj.get_external_deps())
             elif isinstance(obj, str):
                 processed_libs.append(obj)
@@ -238,7 +240,7 @@ class PkgConfigModule(ExtensionModule):
 
     def _escape(self, value):
         '''
-        We cannot use shlex.quote because it quotes with ' and " which does not
+        We cannot use quote_arg because it quotes with ' and " which does not
         work with pkg-config and pkgconf at all.
         '''
         # We should always write out paths with / because pkg-config requires
@@ -386,10 +388,15 @@ class PkgConfigModule(ExtensionModule):
             raise mesonlib.MesonException('URL is not a string.')
         conflicts = mesonlib.stringlistify(kwargs.get('conflicts', []))
 
-        deps = DependenciesHelper(filebase)
+        # Prepend the main library to public libraries list. This is required
+        # so dep.add_pub_libs() can handle dependency ordering correctly and put
+        # extra libraries after the main library.
+        libraries = mesonlib.extract_as_list(kwargs, 'libraries')
         if mainlib:
-            deps.add_pub_libs(mainlib)
-        deps.add_pub_libs(kwargs.get('libraries', []))
+            libraries = [mainlib] + libraries
+
+        deps = DependenciesHelper(filebase)
+        deps.add_pub_libs(libraries)
         deps.add_priv_libs(kwargs.get('libraries_private', []))
         deps.add_pub_reqs(kwargs.get('requires', []))
         deps.add_priv_reqs(kwargs.get('requires_private', []))
@@ -397,7 +404,7 @@ class PkgConfigModule(ExtensionModule):
 
         dversions = kwargs.get('d_module_versions', None)
         if dversions:
-            compiler = state.environment.coredata.compilers.get('d')
+            compiler = state.environment.coredata.compilers.host.get('d')
             if compiler:
                 deps.add_cflags(compiler.get_feature_args({'versions': dversions}, None))
 

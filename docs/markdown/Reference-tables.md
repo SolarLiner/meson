@@ -13,6 +13,7 @@ These are return values of the `get_id` (Compiler family) and
 | clang     | The Clang compiler               | gcc             |
 | clang-cl  | The Clang compiler (MSVC compatible driver) | msvc |
 | dmd       | D lang reference compiler        |                 |
+| emscripten| Emscripten WASM compiler         |                 |
 | flang     | Flang Fortran compiler           |                 |
 | g95       | The G95 Fortran compiler         |                 |
 | gcc       | The GNU Compiler Collection      | gcc             |
@@ -50,10 +51,12 @@ set in the cross file.
 | Value               | Comment                         |
 | -----               | -------                         |
 | aarch64             | 64 bit ARM processor  |
+| alpha               | DEC Alpha processor   |
 | arc                 | 32 bit ARC processor  |
 | arm                 | 32 bit ARM processor  |
 | e2k                 | MCST Elbrus processor |
 | ia64                | Itanium processor     |
+| microblaze          | MicroBlaze processor  |
 | mips                | 32 bit MIPS processor |
 | mips64              | 64 bit MIPS processor |
 | parisc              | HP PA-RISC processor  |
@@ -66,6 +69,8 @@ set in the cross file.
 | s390x               | IBM zSystem s390x     |
 | sparc               | 32 bit SPARC          |
 | sparc64             | SPARC v9 processor    |
+| wasm32              | 32 bit Webassembly    |
+| wasm64              | 64 bit Webassembly    |
 | x86                 | 32 bit x86 processor  |
 | x86_64              | 64 bit x86 processor  |
 
@@ -86,12 +91,14 @@ These are provided by the `.system()` method call.
 | cygwin              | The Cygwin environment for Windows |
 | darwin              | Either OSX or iOS |
 | dragonfly           | DragonFly BSD |
+| emscripten          | Emscripten's Javascript environment |
 | freebsd             | FreeBSD and its derivatives |
 | gnu                 | GNU Hurd |
 | haiku               | |
 | linux               | |
 | netbsd              | |
 | windows             | Any version of Windows |
+| sunos               | illumos and Solaris |
 
 Any string not listed above is not guaranteed to remain stable in
 future releases.
@@ -182,11 +189,21 @@ which are supported by GCC, Clang, and other compilers.
 | returns_nonnull      |
 | unused               |
 | used                 |
-| visibility           |
+| visibility*          |
+| visibility:default†  |
+| visibility:hidden†   |
+| visibility:internal† |
+| visibility:protected†|
 | warning              |
 | warn_unused_result   |
 | weak                 |
 | weakreaf             |
+
+\* *Changed in 0.52.0* the "visibility" target no longer includes
+"protected", which is not present in Apple's clang.
+
+† *New in 0.52.0* These split visibility attributes are preferred to the plain
+"visibility" as they provide narrower checks.
 
 ### MSVC __declspec
 

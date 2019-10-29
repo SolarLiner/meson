@@ -27,7 +27,7 @@ from .. import mlog
 from .. import compilers
 from ..compilers import CompilerArgs
 from ..mesonlib import (
-    MesonException, MachineChoice, File, python_command, replace_if_different
+    MesonException, File, python_command, replace_if_different
 )
 from ..environment import Environment, build_filename
 
@@ -143,22 +143,24 @@ class Vs2010Backend(backends.Backend):
                             for x in args]
                     args = [x.replace('\\', '/') for x in args]
                     cmd = exe_arr + self.replace_extra_args(args, genlist)
-                    if generator.capture:
-                        exe_data = self.serialize_executable(
-                            'generator ' + cmd[0],
-                            cmd[0],
-                            cmd[1:],
-                            self.environment.get_build_dir(),
-                            capture=outfiles[0]
-                        )
-                        cmd = self.environment.get_build_command() + ['--internal', 'exe', exe_data]
-                        abs_pdir = os.path.join(self.environment.get_build_dir(), self.get_target_dir(target))
-                        os.makedirs(abs_pdir, exist_ok=True)
+                    # Always use a wrapper because MSBuild eats random characters when
+                    # there are many arguments.
+                    tdir_abs = os.path.join(self.environment.get_build_dir(), self.get_target_dir(target))
+                    cmd = self.as_meson_exe_cmdline(
+                        'generator ' + cmd[0],
+                        cmd[0],
+                        cmd[1:],
+                        workdir=tdir_abs,
+                        capture=outfiles[0] if generator.capture else None,
+                        force_serialize=True
+                    )
+                    deps = cmd[-1:] + deps
+                    abs_pdir = os.path.join(self.environment.get_build_dir(), self.get_target_dir(target))
+                    os.makedirs(abs_pdir, exist_ok=True)
                     cbs = ET.SubElement(idgroup, 'CustomBuild', Include=infilename)
                     ET.SubElement(cbs, 'Command').text = ' '.join(self.quote_arguments(cmd))
                     ET.SubElement(cbs, 'Outputs').text = ';'.join(outfiles)
-                    if deps:
-                        ET.SubElement(cbs, 'AdditionalInputs').text = ';'.join(deps)
+                    ET.SubElement(cbs, 'AdditionalInputs').text = ';'.join(deps)
         return generator_output_files, custom_target_output_files, custom_target_include_dirs
 
     def generate(self, interp):
@@ -516,11 +518,16 @@ class Vs2010Backend(backends.Backend):
 
     def gen_run_target_vcxproj(self, target, ofname, guid):
         root = self.create_basic_crap(target, guid)
-        cmd_raw = [target.command] + target.args
+        if not target.command:
+            # FIXME: This is an alias target that doesn't run any command, there
+            # is probably a better way than running a this dummy command.
+            cmd_raw = python_command + ['-c', 'exit']
+        else:
+            cmd_raw = [target.command] + target.args
         cmd = python_command + \
             [os.path.join(self.environment.get_script_dir(), 'commandrunner.py'),
-             self.environment.get_build_dir(),
              self.environment.get_source_dir(),
+             self.environment.get_build_dir(),
              self.get_target_dir(target)] + self.environment.get_build_command()
         for i in cmd_raw:
             if isinstance(i, build.BuildTarget):
@@ -553,19 +560,18 @@ class Vs2010Backend(backends.Backend):
         # there are many arguments.
         tdir_abs = os.path.join(self.environment.get_build_dir(), self.get_target_dir(target))
         extra_bdeps = target.get_transitive_build_target_deps()
-        extra_paths = self.determine_windows_extra_paths(target.command[0], extra_bdeps)
-        exe_data = self.serialize_executable(target.name, target.command[0], cmd[1:],
-                                             # All targets run from the target dir
-                                             tdir_abs,
-                                             extra_paths=extra_paths,
-                                             capture=ofilenames[0] if target.capture else None)
-        wrapper_cmd = self.environment.get_build_command() + ['--internal', 'exe', exe_data]
+        wrapper_cmd = self.as_meson_exe_cmdline(target.name, target.command[0], cmd[1:],
+                                                # All targets run from the target dir
+                                                workdir=tdir_abs,
+                                                extra_bdeps=extra_bdeps,
+                                                capture=ofilenames[0] if target.capture else None,
+                                                force_serialize=True)
         if target.build_always_stale:
             # Use a nonexistent file to always consider the target out-of-date.
             ofilenames += [self.nonexistent_file(os.path.join(self.environment.get_scratch_dir(),
                                                  'outofdate.file'))]
         self.add_custom_build(root, 'custom_target', ' '.join(self.quote_arguments(wrapper_cmd)),
-                              deps=[exe_data] + srcs + depend_files, outputs=ofilenames)
+                              deps=wrapper_cmd[-1:] + srcs + depend_files, outputs=ofilenames)
         ET.SubElement(root, 'Import', Project=r'$(VCTargetsPath)\Microsoft.Cpp.targets')
         self.generate_custom_generator_commands(target, root)
         self.add_regen_dependency(root)
@@ -720,7 +726,7 @@ class Vs2010Backend(backends.Backend):
         # No source files, only objects, but we still need a compiler, so
         # return a found compiler
         if len(target.objects) > 0:
-            for lang, c in self.environment.coredata.compilers.items():
+            for lang, c in self.environment.coredata.compilers[target.for_machine].items():
                 if lang in ('c', 'cpp'):
                     return c
         raise MesonException('Could not find a C or C++ compiler. MSVC can only build C/C++ projects.')
@@ -809,28 +815,32 @@ class Vs2010Backend(backends.Backend):
         # Incremental linking increases code size
         if '/INCREMENTAL:NO' in buildtype_link_args:
             ET.SubElement(type_config, 'LinkIncremental').text = 'false'
+
+        # Build information
+        compiles = ET.SubElement(root, 'ItemDefinitionGroup')
+        clconf = ET.SubElement(compiles, 'ClCompile')
         # CRT type; debug or release
         if vscrt_type.value == 'from_buildtype':
             if self.buildtype == 'debug' or self.buildtype == 'debugoptimized':
                 ET.SubElement(type_config, 'UseDebugLibraries').text = 'true'
-                ET.SubElement(type_config, 'RuntimeLibrary').text = 'MultiThreadedDebugDLL'
+                ET.SubElement(clconf, 'RuntimeLibrary').text = 'MultiThreadedDebugDLL'
             else:
                 ET.SubElement(type_config, 'UseDebugLibraries').text = 'false'
-                ET.SubElement(type_config, 'RuntimeLibrary').text = 'MultiThreaded'
+                ET.SubElement(clconf, 'RuntimeLibrary').text = 'MultiThreaded'
         elif vscrt_type.value == 'mdd':
             ET.SubElement(type_config, 'UseDebugLibraries').text = 'true'
-            ET.SubElement(type_config, 'RuntimeLibrary').text = 'MultiThreadedDebugDLL'
+            ET.SubElement(clconf, 'RuntimeLibrary').text = 'MultiThreadedDebugDLL'
         elif vscrt_type.value == 'mt':
             # FIXME, wrong
             ET.SubElement(type_config, 'UseDebugLibraries').text = 'false'
-            ET.SubElement(type_config, 'RuntimeLibrary').text = 'MultiThreaded'
+            ET.SubElement(clconf, 'RuntimeLibrary').text = 'MultiThreaded'
         elif vscrt_type.value == 'mtd':
             # FIXME, wrong
             ET.SubElement(type_config, 'UseDebugLibraries').text = 'true'
-            ET.SubElement(type_config, 'RuntimeLibrary').text = 'MultiThreadedDebug'
+            ET.SubElement(clconf, 'RuntimeLibrary').text = 'MultiThreadedDebug'
         else:
             ET.SubElement(type_config, 'UseDebugLibraries').text = 'false'
-            ET.SubElement(type_config, 'RuntimeLibrary').text = 'MultiThreadedDLL'
+            ET.SubElement(clconf, 'RuntimeLibrary').text = 'MultiThreadedDLL'
         # Debug format
         if '/ZI' in buildtype_args:
             ET.SubElement(type_config, 'DebugInformationFormat').text = 'EditAndContinue'
@@ -865,9 +875,6 @@ class Vs2010Backend(backends.Backend):
         ET.SubElement(direlem, 'TargetName').text = tfilename[0]
         ET.SubElement(direlem, 'TargetExt').text = tfilename[1]
 
-        # Build information
-        compiles = ET.SubElement(root, 'ItemDefinitionGroup')
-        clconf = ET.SubElement(compiles, 'ClCompile')
         # Arguments, include dirs, defines for all files in the current target
         target_args = []
         target_defines = []
@@ -882,27 +889,23 @@ class Vs2010Backend(backends.Backend):
         file_inc_dirs = dict((lang, []) for lang in target.compilers)
         # The order in which these compile args are added must match
         # generate_single_compile() and generate_basic_compiler_args()
-        if self.environment.is_cross_build() and not target.is_cross:
-            for_machine = MachineChoice.BUILD
-        else:
-            for_machine = MachineChoice.HOST
         for l, comp in target.compilers.items():
             if l in file_args:
                 file_args[l] += compilers.get_base_compile_args(self.get_base_options_for_target(target), comp)
-                file_args[l] += comp.get_option_compile_args(self.environment.coredata.compiler_options[for_machine])
+                file_args[l] += comp.get_option_compile_args(self.environment.coredata.compiler_options[target.for_machine])
 
         # Add compile args added using add_project_arguments()
-        for l, args in self.build.projects_args.get(target.subproject, {}).items():
+        for l, args in self.build.projects_args[target.for_machine].get(target.subproject, {}).items():
             if l in file_args:
                 file_args[l] += args
         # Add compile args added using add_global_arguments()
         # These override per-project arguments
-        for l, args in self.build.global_args.items():
+        for l, args in self.build.global_args[target.for_machine].items():
             if l in file_args:
                 file_args[l] += args
         # Compile args added from the env or cross file: CFLAGS/CXXFLAGS, etc. We want these
         # to override all the defaults, but not the per-target compile args.
-        for key, opt in self.environment.coredata.compiler_options[for_machine].items():
+        for key, opt in self.environment.coredata.compiler_options[target.for_machine].items():
             l, suffix = key.split('_', 1)
             if suffix == 'args' and l in file_args:
                 file_args[l] += opt.value
@@ -1082,14 +1085,14 @@ class Vs2010Backend(backends.Backend):
                 options = self.environment.coredata.base_options
                 extra_link_args += compiler.get_std_shared_module_link_args(options)
             # Add link args added using add_project_link_arguments()
-            extra_link_args += self.build.get_project_link_args(compiler, target.subproject, target.is_cross)
+            extra_link_args += self.build.get_project_link_args(compiler, target.subproject, target.for_machine)
             # Add link args added using add_global_link_arguments()
             # These override per-project link arguments
-            extra_link_args += self.build.get_global_link_args(compiler, target.is_cross)
+            extra_link_args += self.build.get_global_link_args(compiler, target.for_machine)
             # Link args added from the env: LDFLAGS, or the cross file. We want
             # these to override all the defaults but not the per-target link
             # args.
-            extra_link_args += self.environment.coredata.get_external_link_args(for_machine, compiler.get_language())
+            extra_link_args += self.environment.coredata.get_external_link_args(target.for_machine, compiler.get_language())
             # Only non-static built targets need link args and link dependencies
             extra_link_args += target.link_args
             # External deps must be last because target link libraries may depend on them.
@@ -1112,7 +1115,7 @@ class Vs2010Backend(backends.Backend):
         # to be after all internal and external libraries so that unresolved
         # symbols from those can be found here. This is needed when the
         # *_winlibs that we want to link to are static mingw64 libraries.
-        extra_link_args += compiler.get_option_link_args(self.environment.coredata.compiler_options[for_machine])
+        extra_link_args += compiler.get_option_link_args(self.environment.coredata.compiler_options[compiler.for_machine])
         (additional_libpaths, additional_links, extra_link_args) = self.split_link_args(extra_link_args.to_native())
 
         # Add more libraries to be linked if needed

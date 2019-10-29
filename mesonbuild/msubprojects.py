@@ -116,7 +116,7 @@ def update_svn(wrap, repo_dir, options):
         mlog.log('  -> Not used.')
         return
     revno = wrap.get('revision')
-    p, out = Popen_safe(['svn', 'info', '--show-item', 'revision', repo_dir])
+    p, out, _ = Popen_safe(['svn', 'info', '--show-item', 'revision', repo_dir])
     current_revno = out
     if current_revno == revno:
         return
@@ -163,7 +163,7 @@ def download(wrap, repo_dir, options):
         return
     try:
         r = Resolver(os.path.dirname(repo_dir))
-        r.resolve(wrap.name)
+        r.resolve(wrap.name, 'meson')
         mlog.log('  -> done')
     except WrapException as e:
         mlog.log('  ->', mlog.red(str(e)))

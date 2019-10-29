@@ -14,15 +14,15 @@
 
 """A library of random helper functionality."""
 from pathlib import Path
-from typing import List
 import sys
 import stat
 import time
-import platform, subprocess, operator, os, shutil, re
+import platform, subprocess, operator, os, shlex, shutil, re
 import collections
 from enum import Enum
-from functools import lru_cache
+from functools import lru_cache, update_wrapper
 import typing
+import uuid
 
 from mesonbuild import mlog
 
@@ -259,7 +259,7 @@ class File:
     def endswith(self, ending: str) -> bool:
         return self.fname.endswith(ending)
 
-    def split(self, s: str) -> List[str]:
+    def split(self, s: str) -> typing.List[str]:
         return self.fname.split(s)
 
     def __eq__(self, other) -> bool:
@@ -323,6 +323,12 @@ class MachineChoice(OrderedEnum):
     BUILD = 0
     HOST = 1
 
+    def get_lower_case_name(self):
+        return PerMachine('build', 'host')[self]
+
+    def get_prefix(self):
+        return PerMachine('build.', '')[self]
+
 
 class PerMachine(typing.Generic[_T]):
     def __init__(self, build: _T, host: _T):
@@ -336,11 +342,7 @@ class PerMachine(typing.Generic[_T]):
         }[machine]
 
     def __setitem__(self, machine: MachineChoice, val: _T) -> None:
-        key = {
-            MachineChoice.BUILD:  'build',
-            MachineChoice.HOST:   'host',
-        }[machine]
-        setattr(self, key, val)
+        setattr(self, machine.get_lower_case_name(), val)
 
     def miss_defaulting(self) -> "PerMachineDefaultable[typing.Optional[_T]]":
         """Unset definition duplicated from their previous to None
@@ -458,98 +460,13 @@ def is_debianlike() -> bool:
 def is_dragonflybsd() -> bool:
     return platform.system().lower() == 'dragonfly'
 
+def is_netbsd() -> bool:
+    return platform.system().lower() == 'netbsd'
+
 def is_freebsd() -> bool:
     return platform.system().lower() == 'freebsd'
 
-def _get_machine_is_cross(env, is_cross):
-    """
-    This is not morally correct, but works for now. For cross builds the build
-    and host machines differ. `is_cross == true` means the host machine, while
-    `is_cross == false` means the build machine. Both are used in practice,
-    even though the documentation refers to the host machine implying we should
-    hard-code it. For non-cross builds `is_cross == false` is passed but the
-    host and build machines are identical so it doesn't matter.
-
-    Users for `for_*` should instead specify up front which machine they want
-    and query that like:
-
-        env.machines[MachineChoice.HOST].is_haiku()
-
-    """
-    for_machine = MachineChoice.HOST if is_cross else MachineChoice.BUILD
-    return env.machines[for_machine]
-
-def for_windows(is_cross, env):
-    """
-    Host machine is windows?
-
-    Deprecated: Please use `env.machines[for_machine].is_windows()`.
-
-    Note: 'host' is the machine on which compiled binaries will run
-    """
-    return _get_machine_is_cross(env, is_cross).is_windows()
-
-def for_cygwin(is_cross, env):
-    """
-    Host machine is cygwin?
-
-    Deprecated: Please use `env.machines[for_machine].is_cygwin()`.
-
-    Note: 'host' is the machine on which compiled binaries will run
-    """
-    return _get_machine_is_cross(env, is_cross).is_cygwin()
-
-def for_linux(is_cross, env):
-    """
-    Host machine is linux?
-
-    Deprecated: Please use `env.machines[for_machine].is_linux()`.
-
-    Note: 'host' is the machine on which compiled binaries will run
-    """
-    return _get_machine_is_cross(env, is_cross).is_linux()
-
-def for_darwin(is_cross, env):
-    """
-    Host machine is Darwin (iOS/OS X)?
-
-    Deprecated: Please use `env.machines[for_machine].is_darwin()`.
-
-    Note: 'host' is the machine on which compiled binaries will run
-    """
-    return _get_machine_is_cross(env, is_cross).is_darwin()
-
-def for_android(is_cross, env):
-    """
-    Host machine is Android?
-
-    Deprecated: Please use `env.machines[for_machine].is_android()`.
-
-    Note: 'host' is the machine on which compiled binaries will run
-    """
-    return _get_machine_is_cross(env, is_cross).is_android()
-
-def for_haiku(is_cross, env):
-    """
-    Host machine is Haiku?
-
-    Deprecated: Please use `env.machines[for_machine].is_haiku()`.
-
-    Note: 'host' is the machine on which compiled binaries will run
-    """
-    return _get_machine_is_cross(env, is_cross).is_haiku()
-
-def for_openbsd(is_cross, env):
-    """
-    Host machine is OpenBSD?
-
-    Deprecated: Please use `env.machines[for_machine].is_openbsd()`.
-
-    Note: 'host' is the machine on which compiled binaries will run
-    """
-    return _get_machine_is_cross(env, is_cross).is_openbsd()
-
-def exe_exists(arglist: List[str]) -> bool:
+def exe_exists(arglist: typing.List[str]) -> bool:
     try:
         if subprocess.run(arglist, timeout=10).returncode == 0:
             return True
@@ -660,7 +577,7 @@ class Version:
         # otherwise, the version with a suffix remaining is greater
         return comparator(len(self._v), len(other._v))
 
-def _version_extract_cmpop(vstr2):
+def _version_extract_cmpop(vstr2: str) -> typing.Tuple[typing.Callable[[typing.Any, typing.Any], bool], str]:
     if vstr2.startswith('>='):
         cmpop = operator.ge
         vstr2 = vstr2[2:]
@@ -687,7 +604,7 @@ def _version_extract_cmpop(vstr2):
 
     return (cmpop, vstr2)
 
-def version_compare(vstr1, vstr2):
+def version_compare(vstr1: str, vstr2: str) -> bool:
     (cmpop, vstr2) = _version_extract_cmpop(vstr2)
     return cmpop(Version(vstr1), Version(vstr2))
 
@@ -705,7 +622,7 @@ def version_compare_many(vstr1, conditions):
 
 # determine if the minimum version satisfying the condition |condition| exceeds
 # the minimum version for a feature |minimum|
-def version_compare_condition_with_min(condition, minimum):
+def version_compare_condition_with_min(condition: str, minimum: str) -> bool:
     if condition.startswith('>='):
         cmpop = operator.le
         condition = condition[2:]
@@ -768,11 +685,11 @@ def default_libexecdir():
 def default_prefix():
     return 'c:/' if is_windows() else '/usr/local'
 
-def get_library_dirs() -> List[str]:
+def get_library_dirs() -> typing.List[str]:
     if is_windows():
-        return ['C:/mingw/lib'] # Fixme
+        return ['C:/mingw/lib'] # TODO: get programatically
     if is_osx():
-        return ['/usr/lib'] # Fix me as well.
+        return ['/usr/lib'] # TODO: get programatically
     # The following is probably Debian/Ubuntu specific.
     # /usr/local/lib is first because it contains stuff
     # installed by the sysadmin and is probably more up-to-date
@@ -788,12 +705,26 @@ def get_library_dirs() -> List[str]:
         plat = 'i386'
     elif machine.startswith('arm'):
         plat = 'arm'
+    else:
+        plat = ''
 
-    unixdirs += [str(x) for x in (Path('/usr/lib/') / plat).iterdir() if x.is_dir()]
+    # Solaris puts 32-bit libraries in the main /lib & /usr/lib directories
+    # and 64-bit libraries in platform specific subdirectories.
+    if is_sunos():
+        if machine == 'i86pc':
+            plat = 'amd64'
+        elif machine.startswith('sun4'):
+            plat = 'sparcv9'
+
+    usr_platdir = Path('/usr/lib/') / plat
+    if usr_platdir.is_dir():
+        unixdirs += [str(x) for x in (usr_platdir).iterdir() if x.is_dir()]
     if os.path.exists('/usr/lib64'):
         unixdirs.append('/usr/lib64')
 
-    unixdirs += [str(x) for x in (Path('/lib/') / plat).iterdir() if x.is_dir()]
+    lib_platdir = Path('/lib/') / plat
+    if lib_platdir.is_dir():
+        unixdirs += [str(x) for x in (lib_platdir).iterdir() if x.is_dir()]
     if os.path.exists('/lib64'):
         unixdirs.append('/lib64')
 
@@ -805,6 +736,84 @@ def has_path_sep(name, sep='/\\'):
         if each in name:
             return True
     return False
+
+
+if is_windows():
+    # shlex.split is not suitable for splitting command line on Window (https://bugs.python.org/issue1724822);
+    # shlex.quote is similarly problematic. Below are "proper" implementations of these functions according to
+    # https://docs.microsoft.com/en-us/cpp/c-language/parsing-c-command-line-arguments and
+    # https://blogs.msdn.microsoft.com/twistylittlepassagesallalike/2011/04/23/everyone-quotes-command-line-arguments-the-wrong-way/
+
+    _whitespace = ' \t\n\r'
+    _find_unsafe_char = re.compile(r'[{}"]'.format(_whitespace)).search
+
+    def quote_arg(arg):
+        if arg and not _find_unsafe_char(arg):
+            return arg
+
+        result = '"'
+        num_backslashes = 0
+        for c in arg:
+            if c == '\\':
+                num_backslashes += 1
+            else:
+                if c == '"':
+                    # Escape all backslashes and the following double quotation mark
+                    num_backslashes = num_backslashes * 2 + 1
+
+                result += num_backslashes * '\\' + c
+                num_backslashes = 0
+
+        # Escape all backslashes, but let the terminating double quotation
+        # mark we add below be interpreted as a metacharacter
+        result += (num_backslashes * 2) * '\\' + '"'
+        return result
+
+    def split_args(cmd):
+        result = []
+        arg = ''
+        num_backslashes = 0
+        num_quotes = 0
+        in_quotes = False
+        for c in cmd:
+            if c == '\\':
+                num_backslashes += 1
+            else:
+                if c == '"' and not (num_backslashes % 2):
+                    # unescaped quote, eat it
+                    arg += (num_backslashes // 2) * '\\'
+                    num_quotes += 1
+                    in_quotes = not in_quotes
+                elif c in _whitespace and not in_quotes:
+                    if arg or num_quotes:
+                        # reached the end of the argument
+                        result.append(arg)
+                        arg = ''
+                        num_quotes = 0
+                else:
+                    if c == '"':
+                        # escaped quote
+                        num_backslashes = (num_backslashes - 1) // 2
+
+                    arg += num_backslashes * '\\' + c
+
+                num_backslashes = 0
+
+        if arg or num_quotes:
+            result.append(arg)
+
+        return result
+else:
+    def quote_arg(arg):
+        return shlex.quote(arg)
+
+    def split_args(cmd):
+        return shlex.split(cmd)
+
+
+def join_args(args):
+    return ' '.join([quote_arg(x) for x in args])
+
 
 def do_replacement(regex, line, variable_format, confdata):
     missing_variables = set()
@@ -1042,7 +1051,10 @@ def expand_arguments(args):
             return None
     return expended_args
 
-def Popen_safe(args, write=None, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs):
+def Popen_safe(args: typing.List[str], write: typing.Optional[str] = None,
+               stdout: typing.Union[typing.BinaryIO, int] = subprocess.PIPE,
+               stderr: typing.Union[typing.BinaryIO, int] = subprocess.PIPE,
+               **kwargs: typing.Any) -> typing.Tuple[subprocess.Popen, str, str]:
     import locale
     encoding = locale.getpreferredencoding()
     if sys.version_info < (3, 6) or not sys.stdout.encoding or encoding.upper() != 'UTF-8':
@@ -1052,12 +1064,16 @@ def Popen_safe(args, write=None, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     o, e = p.communicate(write)
     return p, o, e
 
-def Popen_safe_legacy(args, write=None, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs):
+def Popen_safe_legacy(args: typing.List[str], write: typing.Optional[str] = None,
+                      stdout: typing.Union[typing.BinaryIO, int] = subprocess.PIPE,
+                      stderr: typing.Union[typing.BinaryIO, int] = subprocess.PIPE,
+                      **kwargs: typing.Any) -> typing.Tuple[subprocess.Popen, str, str]:
     p = subprocess.Popen(args, universal_newlines=False, close_fds=False,
                          stdout=stdout, stderr=stderr, **kwargs)
+    input_ = None  # type: typing.Optional[bytes]
     if write is not None:
-        write = write.encode('utf-8')
-    o, e = p.communicate(write)
+        input_ = write.encode('utf-8')
+    o, e = p.communicate(input_)
     if o is not None:
         if sys.stdout.encoding:
             o = o.decode(encoding=sys.stdout.encoding, errors='replace').replace('\r\n', '\n')
@@ -1373,13 +1389,13 @@ class BuildDirLock:
             msvcrt.locking(self.lockfile.fileno(), msvcrt.LK_UNLCK, 1)
         self.lockfile.close()
 
-def relpath(path, start):
+def relpath(path: str, start: str) -> str:
     # On Windows a relative path can't be evaluated for paths on two different
     # drives (i.e. c:\foo and f:\bar).  The only thing left to do is to use the
     # original absolute path.
     try:
         return os.path.relpath(path, start)
-    except ValueError:
+    except (TypeError, ValueError):
         return path
 
 
@@ -1391,3 +1407,134 @@ class LibType(Enum):
     STATIC = 1
     PREFER_SHARED = 2
     PREFER_STATIC = 3
+
+
+class ProgressBarFallback:
+    '''Fallback progress bar implementation when tqdm is not found'''
+    def __init__(self, iterable=None, total=None, bar_type=None, desc=None):
+        if iterable is not None:
+            self.iterable = iter(iterable)
+            return
+        self.total = total
+        self.done = 0
+        self.printed_dots = 0
+        if self.total and bar_type == 'download':
+            print('Download size:', self.total)
+        if desc:
+            print('{}: '.format(desc), end='')
+
+    # Pretend to be an iterator when called as one and don't print any
+    # progress
+    def __iter__(self):
+        return self.iterable
+
+    def __next__(self):
+        return next(self.iterable)
+
+    def print_dot(self):
+        print('.', end='')
+        sys.stdout.flush()
+        self.printed_dots += 1
+
+    def update(self, progress):
+        self.done += progress
+        if not self.total:
+            # Just print one dot per call if we don't have a total length
+            self.print_dot()
+            return
+        ratio = int(self.done / self.total * 10)
+        while self.printed_dots < ratio:
+            self.print_dot()
+
+    def close(self):
+        print('')
+
+try:
+    from tqdm import tqdm
+
+    class ProgressBar(tqdm):
+        def __init__(self, *args, bar_type=None, **kwargs):
+            if bar_type == 'download':
+                kwargs.update({'unit': 'bytes', 'leave': True})
+            else:
+                kwargs.update({'leave': False})
+            kwargs['ncols'] = 100
+            super().__init__(*args, **kwargs)
+except ImportError:
+    ProgressBar = ProgressBarFallback
+
+
+def get_wine_shortpath(winecmd, wine_paths):
+
+    """ Get A short version of @wine_paths to avoid
+    reaching WINEPATH number of char limit.
+    """
+
+    seen = set()
+    wine_paths = [p for p in wine_paths if not (p in seen or seen.add(p))]
+
+    getShortPathScript = '%s.bat' % str(uuid.uuid4()).lower()[:5]
+    with open(getShortPathScript, mode='w') as f:
+        f.write("@ECHO OFF\nfor %%x in (%*) do (\n echo|set /p=;%~sx\n)\n")
+        f.flush()
+    try:
+        with open(os.devnull, 'w') as stderr:
+            wine_path = subprocess.check_output(
+                winecmd +
+                ['cmd', '/C', getShortPathScript] + wine_paths,
+                stderr=stderr).decode('utf-8')
+    except subprocess.CalledProcessError as e:
+        print("Could not get short paths: %s" % e)
+        wine_path = ';'.join(wine_paths)
+    finally:
+        os.remove(getShortPathScript)
+    if len(wine_path) > 2048:
+        raise MesonException(
+            'WINEPATH size {} > 2048'
+            ' this will cause random failure.'.format(
+                len(wine_path)))
+
+    return wine_path.strip(';')
+
+def run_once(func):
+    ret = []
+
+    def wrapper(*args, **kwargs):
+        if ret:
+            return ret[0]
+
+        val = func(*args, **kwargs)
+        ret.append(val)
+        return val
+
+    return update_wrapper(wrapper, func)
+
+
+class OptionProxy:
+    def __init__(self, value):
+        self.value = value
+
+class OptionOverrideProxy:
+    '''Mimic an option list but transparently override
+    selected option values.'''
+    def __init__(self, overrides, *options):
+        self.overrides = overrides
+        self.options = options
+
+    def __getitem__(self, option_name):
+        for opts in self.options:
+            if option_name in opts:
+                return self._get_override(option_name, opts[option_name])
+        raise KeyError('Option not found', option_name)
+
+    def _get_override(self, option_name, base_opt):
+        if option_name in self.overrides:
+            return OptionProxy(base_opt.validate_value(self.overrides[option_name]))
+        return base_opt
+
+    def copy(self):
+        result = {}
+        for opts in self.options:
+            for option_name in opts:
+                result[option_name] = self._get_override(option_name, opts[option_name])
+        return result

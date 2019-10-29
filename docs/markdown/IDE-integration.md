@@ -67,7 +67,7 @@ be present. It stores the installation location for each file in `filename`.
 If one file in `filename` is not installed, its corresponding install location
 is set to `null`.
 
-The `subproject' key specifies the name of the subproject this target was
+The `subproject` key specifies the name of the subproject this target was
 defined in, or `null` if the target was defined in the top level project.
 
 A target usually generates only one file. However, it is possible for custom
@@ -143,7 +143,8 @@ the `intro-buildoptions.json` file. Here is the JSON format for each option.
     "description": "the description",
     "type": "type ID",
     "value": "value depends on type",
-    "section": "section ID"
+    "section": "section ID",
+    "machine": "machine ID"
 }
 ```
 
@@ -167,6 +168,13 @@ The possible values for `section` are:
  - directory
  - user
  - test
+
+The `machine` key specifies the machine configuration for the option. Possible
+values are:
+
+ - any
+ - host
+ - build
 
 To set the options, use the `meson configure` command.
 
@@ -250,5 +258,6 @@ This API can also work without a build directory for the `--projectinfo` command
 # Existing integrations
 
 - [Gnome Builder](https://wiki.gnome.org/Apps/Builder)
+- [KDevelop](https://www.kdevelop.org)
 - [Eclipse CDT](https://www.eclipse.org/cdt/) (experimental)
 - [Meson Cmake Wrapper](https://github.com/prozum/meson-cmake-wrapper) (for cmake IDEs)

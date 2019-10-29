@@ -18,8 +18,8 @@ import shutil
 from . import ExtensionModule, ModuleReturnValue
 
 from .. import build, dependencies, mesonlib, mlog
-from ..interpreterbase import permittedKwargs
-from ..interpreter import ConfigurationDataHolder
+from ..interpreterbase import permittedKwargs, FeatureNew, stringArgs, InterpreterObject, ObjectHolder
+from ..interpreter import ConfigurationDataHolder, InterpreterException, SubprojectHolder
 
 
 COMPATIBILITIES = ['AnyNewerVersion', 'SameMajorVersion', 'SameMinorVersion', 'ExactVersion']
@@ -29,6 +29,7 @@ PACKAGE_INIT_BASE = '''
 ####### Expanded from \\@PACKAGE_INIT\\@ by configure_package_config_file() #######
 ####### Any changes to this file will be overwritten by the next CMake run ####
 ####### The input file was @inputFileName@ ########
+
 get_filename_component(PACKAGE_PREFIX_DIR "${CMAKE_CURRENT_LIST_DIR}/@PACKAGE_RELATIVE_PATH@" ABSOLUTE)
 '''
 PACKAGE_INIT_EXT = '''
@@ -42,7 +43,73 @@ endif()
 unset(_realOrig)
 unset(_realCurr)
 '''
+PACKAGE_INIT_SET_AND_CHECK = '''
+macro(set_and_check _var _file)
+  set(${_var} "${_file}")
+  if(NOT EXISTS "${_file}")
+    message(FATAL_ERROR "File or directory ${_file} referenced by variable ${_var} does not exist !")
+  endif()
+endmacro()
 
+####################################################################################
+'''
+
+class CMakeSubprojectHolder(InterpreterObject, ObjectHolder):
+    def __init__(self, subp, pv):
+        assert(isinstance(subp, SubprojectHolder))
+        assert(hasattr(subp, 'cm_interpreter'))
+        InterpreterObject.__init__(self)
+        ObjectHolder.__init__(self, subp, pv)
+        self.methods.update({'get_variable': self.get_variable,
+                             'dependency': self.dependency,
+                             'include_directories': self.include_directories,
+                             'target': self.target,
+                             'target_type': self.target_type,
+                             'target_list': self.target_list,
+                             })
+
+    def _args_to_info(self, args):
+        if len(args) != 1:
+            raise InterpreterException('Exactly one argument is required.')
+
+        tgt = args[0]
+        res = self.held_object.cm_interpreter.target_info(tgt)
+        if res is None:
+            raise InterpreterException('The CMake target {} does not exist'.format(tgt))
+
+        # Make sure that all keys are present (if not this is a bug)
+        assert(all([x in res for x in ['inc', 'src', 'dep', 'tgt', 'func']]))
+        return res
+
+    @permittedKwargs({})
+    def get_variable(self, args, kwargs):
+        return self.held_object.get_variable_method(args, kwargs)
+
+    @permittedKwargs({})
+    def dependency(self, args, kwargs):
+        info = self._args_to_info(args)
+        return self.get_variable([info['dep']], kwargs)
+
+    @permittedKwargs({})
+    def include_directories(self, args, kwargs):
+        info = self._args_to_info(args)
+        return self.get_variable([info['inc']], kwargs)
+
+    @permittedKwargs({})
+    def target(self, args, kwargs):
+        info = self._args_to_info(args)
+        return self.get_variable([info['tgt']], kwargs)
+
+    @permittedKwargs({})
+    def target_type(self, args, kwargs):
+        info = self._args_to_info(args)
+        return info['func']
+
+    @permittedKwargs({})
+    def target_list(self, args, kwargs):
+        if len(args) > 0:
+            raise InterpreterException('target_list does not take any parameters.')
+        return self.held_object.cm_interpreter.target_list()
 
 class CmakeModule(ExtensionModule):
     cmake_detected = False
@@ -51,8 +118,10 @@ class CmakeModule(ExtensionModule):
     def __init__(self, interpreter):
         super().__init__(interpreter)
         self.snippets.add('configure_package_config_file')
+        self.snippets.add('subproject')
 
-    def detect_voidp_size(self, compilers, env):
+    def detect_voidp_size(self, env):
+        compilers = env.coredata.compilers.host
         compiler = compilers.get('c', None)
         if not compiler:
             compiler = compilers.get('cpp', None)
@@ -115,7 +184,7 @@ class CmakeModule(ExtensionModule):
 
         conf = {
             'CVF_VERSION': (version, ''),
-            'CMAKE_SIZEOF_VOID_P': (str(self.detect_voidp_size(state.compilers, state.environment)), '')
+            'CMAKE_SIZEOF_VOID_P': (str(self.detect_voidp_size(state.environment)), '')
         }
         mesonlib.do_conf_file(template_file, version_file, conf, 'meson')
 
@@ -126,6 +195,7 @@ class CmakeModule(ExtensionModule):
         package_init = PACKAGE_INIT_BASE.replace('@PACKAGE_RELATIVE_PATH@', PACKAGE_RELATIVE_PATH)
         package_init = package_init.replace('@inputFileName@', infile)
         package_init += extra
+        package_init += PACKAGE_INIT_SET_AND_CHECK
 
         try:
             with open(infile, "r") as fin:
@@ -208,6 +278,18 @@ class CmakeModule(ExtensionModule):
         interpreter.build.data.append(res)
 
         return res
+
+    @FeatureNew('subproject', '0.51.0')
+    @permittedKwargs({'cmake_options', 'required'})
+    @stringArgs
+    def subproject(self, interpreter, state, args, kwargs):
+        if len(args) != 1:
+            raise InterpreterException('Subproject takes exactly one argument')
+        dirname = args[0]
+        subp = interpreter.do_subproject(dirname, 'cmake', kwargs)
+        if not subp.held_object:
+            return subp
+        return CMakeSubprojectHolder(subp, dirname)
 
 def initialize(*args, **kwargs):
     return CmakeModule(*args, **kwargs)

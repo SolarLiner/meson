@@ -8,11 +8,13 @@ If you have a project that uses Meson that you want to add to this list, please 
 listed in the [`meson` GitHub topic](https://github.com/topics/meson).
 
  - [2048.cpp](https://github.com/plibither8/2048.cpp), a fully featured terminal version of the game "2048" written in C++
+ - [Aravis](https://github.com/AravisProject/aravis), a glib/gobject based library for video acquisition using Genicam cameras
  - [Akira](https://github.com/akiraux/Akira), a native Linux app for UI and UX design built in Vala and Gtk
  - [AQEMU](https://github.com/tobimensch/aqemu), a Qt GUI for QEMU virtual machines, since version 0.9.3
  - [Arduino sample project](https://github.com/jpakkane/mesonarduino)
  - [bolt](https://gitlab.freedesktop.org/bolt/bolt), userspace daemon to enable security levels for Thunderbolt™ 3 on Linux
  - [Budgie Desktop](https://github.com/budgie-desktop/budgie-desktop), a desktop environment built on GNOME technologies
+ - [Bzip2](https://gitlab.com/federicomenaquintero/bzip2), the bzip2 compressor/decompressor
  - [Cage](https://github.com/Hjdskes/cage), a Wayland kiosk
  - [casync](https://github.com/systemd/casync), Content-Addressable Data Synchronization Tool
  - [cinnamon-desktop](https://github.com/linuxmint/cinnamon-desktop), the cinnamon desktop library
@@ -45,8 +47,10 @@ listed in the [`meson` GitHub topic](https://github.com/topics/meson).
  - [GtkDApp](https://gitlab.com/csoriano/GtkDApp), an application template for developing Flatpak apps with Gtk+ and D
  - [GVfs](https://git.gnome.org/browse/gvfs/), a userspace virtual filesystem designed to work with the I/O abstraction of GIO
  - [Hardcode-Tray](https://github.com/bil-elmoussaoui/Hardcode-Tray), fixes hardcoded tray icons in Linux
+ - [HelenOS](http://helenos.org), a portable microkernel-based multiserver operating system
  - [HexChat](https://github.com/hexchat/hexchat), a cross-platform IRC client in C
  - [IGT](https://cgit.freedesktop.org/xorg/app/intel-gpu-tools/), Linux kernel graphics driver test suite
+ - [Irssi](https://github.com/irssi/irssi), a terminal chat client in C
  - [iSH](https://github.com/tbodt/ish), Linux shell for iOS
  - [Janet](https://github.com/janet-lang/janet), a functional and imperative programming language and bytecode interpreter
  - [json](https://github.com/nlohmann/json), JSON for Modern C++
@@ -71,7 +75,7 @@ format files
  - [Libva](https://github.com/intel/libva), an implementation for the VA (VIdeo Acceleration) API
  - [Libzim](https://github.com/openzim/libzim), the reference implementation for the ZIM file format
  - [Marker](https://github.com/fabiocolacio/Marker), a GTK-3 markdown editor
- - [Mesa](https://cgit.freedesktop.org/mesa/mesa/), an open source graphics driver project
+ - [Mesa](https://gitlab.freedesktop.org/mesa/mesa/), an open source graphics driver project
  - [MiracleCast](https://github.com/albfan/miraclecast), connect external monitors to your system via Wifi-Display specification aka Miracast
  - [Nautilus](https://gitlab.gnome.org/GNOME/nautilus), the GNOME file manager
  - [Nemo](https://github.com/linuxmint/nemo), the file manager for the Cinnamon desktop environment
@@ -90,6 +94,7 @@ format files
  - [Playerctl](https://github.com/acrisci/playerctl), mpris command-line controller and library for spotify, vlc, audacious, bmp, cmus, and others
  - [Polari](https://gitlab.gnome.org/GNOME/polari), an IRC client
  - [radare2](https://github.com/radare/radare2), unix-like reverse engineering framework and commandline tools (not the default)
+ - [RxDock](https://gitlab.com/rxdock/rxdock), a protein-ligand docking software designed for high throughput virtual screening (fork of rDock)
  - [SSHFS](https://github.com/libfuse/sshfs), allows you to mount a remote filesystem using SFTP
  - [sway](https://github.com/swaywm/sway), i3-compatible Wayland compositor
  - [Sysprof](https://git.gnome.org/browse/sysprof), a profiling tool

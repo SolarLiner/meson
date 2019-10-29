@@ -19,25 +19,29 @@ import typing
 
 from .. import coredata
 from .. import mlog
-from ..mesonlib import MesonException, version_compare
+from ..mesonlib import MesonException, MachineChoice, version_compare
 
 from .compilers import (
     gnu_winlibs,
     msvc_winlibs,
-    ClangCompiler,
-    GnuCompiler,
-    ElbrusCompiler,
-    IntelGnuLikeCompiler,
-    IntelVisualStudioLikeCompiler,
-    PGICompiler,
-    ArmCompiler,
-    ArmclangCompiler,
-    CcrxCompiler,
     Compiler,
-    VisualStudioLikeCompiler,
 )
 from .c_function_attributes import CXX_FUNC_ATTRIBUTES, C_FUNC_ATTRIBUTES
-from .clike import CLikeCompiler
+from .mixins.clike import CLikeCompiler
+from .mixins.ccrx import CcrxCompiler
+from .mixins.arm import ArmCompiler, ArmclangCompiler
+from .mixins.visualstudio import VisualStudioLikeCompiler
+from .mixins.gnu import GnuCompiler
+from .mixins.intel import IntelGnuLikeCompiler, IntelVisualStudioLikeCompiler
+from .mixins.clang import ClangCompiler
+from .mixins.elbrus import ElbrusCompiler
+from .mixins.pgi import PGICompiler
+from .mixins.islinker import BasicLinkerIsCompilerMixin, LinkerEnvVarsMixin
+from .mixins.emscripten import EmscriptenMixin
+
+if typing.TYPE_CHECKING:
+    from ..envconfig import MachineInfo
+
 
 def non_msvc_eh_options(eh, args):
     if eh == 'none':
@@ -55,11 +59,11 @@ class CPPCompiler(CLikeCompiler, Compiler):
         except KeyError:
             raise MesonException('Unknown function attribute "{}"'.format(name))
 
-    def __init__(self, exelist, version, is_cross: bool,
-                 exe_wrap: typing.Optional[str] = None, **kwargs):
+    def __init__(self, exelist, version, for_machine: MachineChoice, is_cross: bool,
+                 info: 'MachineInfo', exe_wrap: typing.Optional[str] = None, **kwargs):
         # If a child ObjCPP class has already set it, don't set it ourselves
         self.language = 'cpp'
-        Compiler.__init__(self, exelist, version, **kwargs)
+        Compiler.__init__(self, exelist, version, for_machine, info, **kwargs)
         CLikeCompiler.__init__(self, is_cross, exe_wrap)
 
     def get_display_language(self):
@@ -69,7 +73,7 @@ class CPPCompiler(CLikeCompiler, Compiler):
         return ['-nostdinc++']
 
     def sanity_check(self, work_dir, environment):
-        code = 'class breakCCompiler;int main(int argc, char **argv) { return 0; }\n'
+        code = 'class breakCCompiler;int main() { return 0; }\n'
         return self.sanity_check_impl(work_dir, environment, 'sanitycheckcpp.cc', code)
 
     def get_compiler_check_args(self):
@@ -132,7 +136,7 @@ class CPPCompiler(CLikeCompiler, Compiler):
         }
 
         # Currently, remapping is only supported for Clang, Elbrus and GCC
-        assert(self.id in frozenset(['clang', 'lcc', 'gcc']))
+        assert(self.id in frozenset(['clang', 'lcc', 'gcc', 'emscripten']))
 
         if cpp_std not in CPP_FALLBACKS:
             # 'c++03' and 'c++98' don't have fallback types
@@ -147,9 +151,11 @@ class CPPCompiler(CLikeCompiler, Compiler):
 
 
 class ClangCPPCompiler(ClangCompiler, CPPCompiler):
-    def __init__(self, exelist, version, compiler_type, is_cross, exe_wrapper=None, **kwargs):
-        CPPCompiler.__init__(self, exelist, version, is_cross, exe_wrapper, **kwargs)
-        ClangCompiler.__init__(self, compiler_type)
+    def __init__(self, exelist, version, for_machine: MachineChoice,
+                 is_cross, info: 'MachineInfo', exe_wrapper=None, **kwargs):
+        CPPCompiler.__init__(self, exelist, version, for_machine, is_cross,
+                             info, exe_wrapper, **kwargs)
+        ClangCompiler.__init__(self)
         default_warn_args = ['-Wall', '-Winvalid-pch', '-Wnon-virtual-dtor']
         self.warn_args = {'0': [],
                           '1': default_warn_args,
@@ -184,10 +190,34 @@ class ClangCPPCompiler(ClangCompiler, CPPCompiler):
         return ['-lstdc++']
 
 
+class AppleClangCPPCompiler(ClangCPPCompiler):
+
+    pass
+
+
+class EmscriptenCPPCompiler(LinkerEnvVarsMixin, EmscriptenMixin, BasicLinkerIsCompilerMixin, ClangCPPCompiler):
+    def __init__(self, exelist, version, for_machine: MachineChoice,
+                 is_cross: bool, info: 'MachineInfo', exe_wrapper=None, **kwargs):
+        if not is_cross:
+            raise MesonException('Emscripten compiler can only be used for cross compilation.')
+        ClangCPPCompiler.__init__(self, exelist=exelist, version=version,
+                                  for_machine=for_machine, is_cross=is_cross,
+                                  info=info, exe_wrapper=exe_wrapper, **kwargs)
+        self.id = 'emscripten'
+
+    def get_option_compile_args(self, options):
+        args = []
+        std = options['cpp_std']
+        if std.value != 'none':
+            args.append(self._find_best_cpp_std(std.value))
+        return args
+
+
 class ArmclangCPPCompiler(ArmclangCompiler, CPPCompiler):
-    def __init__(self, exelist, version, compiler_type, is_cross, exe_wrapper=None, **kwargs):
-        CPPCompiler.__init__(self, exelist, version, is_cross, exe_wrapper, **kwargs)
-        ArmclangCompiler.__init__(self, compiler_type)
+    def __init__(self, exelist, version, for_machine: MachineChoice,
+                 is_cross, info: 'MachineInfo', exe_wrapper=None, **kwargs):
+        CPPCompiler.__init__(self, exelist, version, for_machine, is_cross, exe_wrapper, **kwargs)
+        ArmclangCompiler.__init__(self)
         default_warn_args = ['-Wall', '-Winvalid-pch', '-Wnon-virtual-dtor']
         self.warn_args = {'0': [],
                           '1': default_warn_args,
@@ -196,8 +226,7 @@ class ArmclangCPPCompiler(ArmclangCompiler, CPPCompiler):
 
     def get_options(self):
         opts = CPPCompiler.get_options(self)
-        opts.update({'cpp_eh': coredata.UserComboOption('cpp_eh',
-                                                        'C++ exception handling type.',
+        opts.update({'cpp_eh': coredata.UserComboOption('C++ exception handling type.',
                                                         ['none', 'default', 'a', 's', 'sc'],
                                                         'default'),
                      'cpp_std': coredata.UserComboOption('C++ language standard to use',
@@ -221,9 +250,10 @@ class ArmclangCPPCompiler(ArmclangCompiler, CPPCompiler):
 
 
 class GnuCPPCompiler(GnuCompiler, CPPCompiler):
-    def __init__(self, exelist, version, compiler_type, is_cross, exe_wrap, defines, **kwargs):
-        CPPCompiler.__init__(self, exelist, version, is_cross, exe_wrap, **kwargs)
-        GnuCompiler.__init__(self, compiler_type, defines)
+    def __init__(self, exelist, version, for_machine: MachineChoice,
+                 is_cross, info: 'MachineInfo', exe_wrap, defines, **kwargs):
+        CPPCompiler.__init__(self, exelist, version, for_machine, is_cross, info, exe_wrap, **kwargs)
+        GnuCompiler.__init__(self, defines)
         default_warn_args = ['-Wall', '-Winvalid-pch', '-Wnon-virtual-dtor']
         self.warn_args = {'0': [],
                           '1': default_warn_args,
@@ -241,7 +271,7 @@ class GnuCPPCompiler(GnuCompiler, CPPCompiler):
                                                          'none'),
                      'cpp_debugstl': coredata.UserBooleanOption('STL debug mode',
                                                                 False)})
-        if self.compiler_type.is_windows_compiler:
+        if self.info.is_windows() or self.info.is_cygwin():
             opts.update({
                 'cpp_winlibs': coredata.UserArrayOption('Standard Win libraries to link against',
                                                         gnu_winlibs), })
@@ -260,7 +290,7 @@ class GnuCPPCompiler(GnuCompiler, CPPCompiler):
         return args
 
     def get_option_link_args(self, options):
-        if self.compiler_type.is_windows_compiler:
+        if self.info.is_windows() or self.info.is_cygwin():
             return options['cpp_winlibs'].value[:]
         return []
 
@@ -272,15 +302,20 @@ class GnuCPPCompiler(GnuCompiler, CPPCompiler):
 
 
 class PGICPPCompiler(PGICompiler, CPPCompiler):
-    def __init__(self, exelist, version, compiler_type, is_cross, exe_wrapper=None, **kwargs):
-        CPPCompiler.__init__(self, exelist, version, is_cross, exe_wrapper, **kwargs)
-        PGICompiler.__init__(self, compiler_type)
+    def __init__(self, exelist, version, for_machine: MachineChoice,
+                 is_cross, info: 'MachineInfo', exe_wrapper=None, **kwargs):
+        CPPCompiler.__init__(self, exelist, version, for_machine, is_cross, info, exe_wrapper, **kwargs)
+        PGICompiler.__init__(self)
 
 
 class ElbrusCPPCompiler(GnuCPPCompiler, ElbrusCompiler):
-    def __init__(self, exelist, version, compiler_type, is_cross, exe_wrapper=None, defines=None, **kwargs):
-        GnuCPPCompiler.__init__(self, exelist, version, compiler_type, is_cross, exe_wrapper, defines, **kwargs)
-        ElbrusCompiler.__init__(self, compiler_type, defines)
+    def __init__(self, exelist, version, for_machine: MachineChoice,
+                 is_cross, info: 'MachineInfo', exe_wrapper=None,
+                 defines=None, **kwargs):
+        GnuCPPCompiler.__init__(self, exelist, version, for_machine,
+                                is_cross, info, exe_wrapper, defines,
+                                **kwargs)
+        ElbrusCompiler.__init__(self, defines)
 
     # It does not support c++/gnu++ 17 and 1z, but still does support 0x, 1y, and gnu++98.
     def get_options(self):
@@ -308,9 +343,11 @@ class ElbrusCPPCompiler(GnuCPPCompiler, ElbrusCompiler):
 
 
 class IntelCPPCompiler(IntelGnuLikeCompiler, CPPCompiler):
-    def __init__(self, exelist, version, compiler_type, is_cross, exe_wrap, **kwargs):
-        CPPCompiler.__init__(self, exelist, version, is_cross, exe_wrap, **kwargs)
-        IntelGnuLikeCompiler.__init__(self, compiler_type)
+    def __init__(self, exelist, version, for_machine: MachineChoice,
+                 is_cross, info: 'MachineInfo', exe_wrap, **kwargs):
+        CPPCompiler.__init__(self, exelist, version, for_machine, is_cross,
+                             info, exe_wrap, **kwargs)
+        IntelGnuLikeCompiler.__init__(self)
         self.lang_header = 'c++-header'
         default_warn_args = ['-Wall', '-w3', '-diag-disable:remark',
                              '-Wpch-messages', '-Wnon-virtual-dtor']
@@ -371,9 +408,11 @@ class VisualStudioLikeCPPCompilerMixin:
         'vc++11': (True, 11),
         'vc++14': (True, 14),
         'vc++17': (True, 17),
+        'vc++latest': (True, "latest"),
         'c++11': (False, 11),
         'c++14': (False, 14),
         'c++17': (False, 17),
+        'c++latest': (False, "latest"),
     }
 
     def get_option_link_args(self, options):
@@ -441,8 +480,9 @@ class CPP11AsCPP14Mixin:
 
 
 class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixin, VisualStudioLikeCompiler, CPPCompiler):
-    def __init__(self, exelist, version, is_cross, exe_wrap, target):
-        CPPCompiler.__init__(self, exelist, version, is_cross, exe_wrap)
+    def __init__(self, exelist, version, for_machine: MachineChoice,
+                 is_cross: bool, info: 'MachineInfo', exe_wrap, target, **kwargs):
+        CPPCompiler.__init__(self, exelist, version, for_machine, is_cross, info, exe_wrap, **kwargs)
         VisualStudioLikeCompiler.__init__(self, target)
         self.base_options = ['b_pch', 'b_vscrt'] # FIXME add lto, pgo and the like
         self.id = 'msvc'
@@ -474,8 +514,10 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
         return args
 
 class ClangClCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixin, VisualStudioLikeCompiler, CPPCompiler):
-    def __init__(self, exelist, version, is_cross, exe_wrap, target):
-        CPPCompiler.__init__(self, exelist, version, is_cross, exe_wrap)
+    def __init__(self, exelist, version, for_machine: MachineChoice,
+                 is_cross, info: 'MachineInfo', exe_wrap, target, **kwargs):
+        CPPCompiler.__init__(self, exelist, version, for_machine, is_cross,
+                             info, exe_wrap, **kwargs)
         VisualStudioLikeCompiler.__init__(self, target)
         self.id = 'clang-cl'
 
@@ -486,8 +528,10 @@ class ClangClCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixin, Vi
 
 class IntelClCPPCompiler(VisualStudioLikeCPPCompilerMixin, IntelVisualStudioLikeCompiler, CPPCompiler):
 
-    def __init__(self, exelist, version, is_cross, exe_wrap, target):
-        CPPCompiler.__init__(self, exelist, version, is_cross, exe_wrap)
+    def __init__(self, exelist, version, for_machine: MachineChoice,
+                 is_cross, info: 'MachineInfo', exe_wrap, target, **kwargs):
+        CPPCompiler.__init__(self, exelist, version, for_machine, is_cross,
+                             info, exe_wrap, **kwargs)
         IntelVisualStudioLikeCompiler.__init__(self, target)
 
     def get_options(self):
@@ -497,9 +541,11 @@ class IntelClCPPCompiler(VisualStudioLikeCPPCompilerMixin, IntelVisualStudioLike
 
 
 class ArmCPPCompiler(ArmCompiler, CPPCompiler):
-    def __init__(self, exelist, version, compiler_type, is_cross, exe_wrap=None, **kwargs):
-        CPPCompiler.__init__(self, exelist, version, is_cross, exe_wrap, **kwargs)
-        ArmCompiler.__init__(self, compiler_type)
+    def __init__(self, exelist, version, for_machine: MachineChoice,
+                 is_cross, info: 'MachineInfo', exe_wrap=None, **kwargs):
+        CPPCompiler.__init__(self, exelist, version, for_machine, is_cross,
+                             info, exe_wrap, **kwargs)
+        ArmCompiler.__init__(self)
 
     def get_options(self):
         opts = CPPCompiler.get_options(self)
@@ -525,9 +571,11 @@ class ArmCPPCompiler(ArmCompiler, CPPCompiler):
 
 
 class CcrxCPPCompiler(CcrxCompiler, CPPCompiler):
-    def __init__(self, exelist, version, compiler_type, is_cross, exe_wrap=None, **kwargs):
-        CPPCompiler.__init__(self, exelist, version, is_cross, exe_wrap, **kwargs)
-        CcrxCompiler.__init__(self, compiler_type)
+    def __init__(self, exelist, version, for_machine: MachineChoice,
+                 is_cross, info: 'MachineInfo', exe_wrap=None, **kwargs):
+        CPPCompiler.__init__(self, exelist, version, for_machine, is_cross,
+                             info, exe_wrap, **kwargs)
+        CcrxCompiler.__init__(self)
 
     # Override CCompiler.get_always_args
     def get_always_args(self):
@@ -541,9 +589,6 @@ class CcrxCPPCompiler(CcrxCompiler, CPPCompiler):
 
     def get_output_args(self, target):
         return ['-output=obj=%s' % target]
-
-    def get_linker_output_args(self, outputname):
-        return ['-output=%s' % outputname]
 
     def get_option_link_args(self, options):
         return []

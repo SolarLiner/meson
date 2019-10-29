@@ -14,6 +14,7 @@
 
 # A tool to run tests in many different ways.
 
+from pathlib import Path
 from collections import namedtuple
 from copy import deepcopy
 import argparse
@@ -28,7 +29,6 @@ import pickle
 import platform
 import random
 import re
-import shlex
 import signal
 import subprocess
 import sys
@@ -40,7 +40,7 @@ from . import build
 from . import environment
 from . import mlog
 from .dependencies import ExternalProgram
-from .mesonlib import substring_is_in_list, MesonException
+from .mesonlib import MesonException, get_wine_shortpath, split_args
 
 if typing.TYPE_CHECKING:
     from .backend.backends import TestSerialisation
@@ -85,9 +85,11 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
                         help='Do not rebuild before running tests.')
     parser.add_argument('--gdb', default=False, dest='gdb', action='store_true',
                         help='Run test under gdb.')
+    parser.add_argument('--gdb-path', default='gdb', dest='gdb_path',
+                        help='Path to the gdb binary (default: gdb).')
     parser.add_argument('--list', default=False, dest='list', action='store_true',
                         help='List available tests.')
-    parser.add_argument('--wrapper', default=None, dest='wrapper', type=shlex.split,
+    parser.add_argument('--wrapper', default=None, dest='wrapper', type=split_args,
                         help='wrapper to run tests with (e.g. Valgrind)')
     parser.add_argument('-C', default='.', dest='wd',
                         help='directory to cd into before running')
@@ -115,7 +117,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
                         ' more time to execute.')
     parser.add_argument('--setup', default=None, dest='setup',
                         help='Which test setup to use.')
-    parser.add_argument('--test-args', default=[], type=shlex.split,
+    parser.add_argument('--test-args', default=[], type=split_args,
                         help='Arguments to pass to the specified test(s) or all tests')
     parser.add_argument('args', nargs='*',
                         help='Optional list of tests to run')
@@ -299,6 +301,9 @@ class TAPParser:
                     yield self.Version(version=version)
                 continue
 
+            if len(line) == 0:
+                continue
+
             yield self.Error('unexpected input at line %d' % (lineno,))
 
         if state == self._YAML:
@@ -426,18 +431,18 @@ def run_with_mono(fname: str) -> bool:
     return False
 
 def load_benchmarks(build_dir: str) -> typing.List['TestSerialisation']:
-    datafile = os.path.join(build_dir, 'meson-private', 'meson_benchmark_setup.dat')
-    if not os.path.isfile(datafile):
-        raise TestException('Directory ${!r} does not seem to be a Meson build directory.'.format(build_dir))
-    with open(datafile, 'rb') as f:
+    datafile = Path(build_dir) / 'meson-private' / 'meson_benchmark_setup.dat'
+    if not datafile.is_file():
+        raise TestException('Directory {!r} does not seem to be a Meson build directory.'.format(build_dir))
+    with datafile.open('rb') as f:
         obj = typing.cast(typing.List['TestSerialisation'], pickle.load(f))
     return obj
 
 def load_tests(build_dir: str) -> typing.List['TestSerialisation']:
-    datafile = os.path.join(build_dir, 'meson-private', 'meson_test_setup.dat')
-    if not os.path.isfile(datafile):
-        raise TestException('Directory ${!r} does not seem to be a Meson build directory.'.format(build_dir))
-    with open(datafile, 'rb') as f:
+    datafile = Path(build_dir) / 'meson-private' / 'meson_test_setup.dat'
+    if not datafile.is_file():
+        raise TestException('Directory {!r} does not seem to be a Meson build directory.'.format(build_dir))
+    with datafile.open('rb') as f:
         obj = typing.cast(typing.List['TestSerialisation'], pickle.load(f))
     return obj
 
@@ -457,7 +462,7 @@ class SingleTestRunner:
         elif not self.test.is_cross_built and run_with_mono(self.test.fname[0]):
             return ['mono'] + self.test.fname
         else:
-            if self.test.is_cross_built:
+            if self.test.is_cross_built and self.test.needs_exe_wrapper:
                 if self.test.exe_runner is None:
                     # Can not run test on cross compiled executable
                     # because there is no execute wrapper.
@@ -487,15 +492,15 @@ class SingleTestRunner:
 
         if len(self.test.extra_paths) > 0:
             self.env['PATH'] = os.pathsep.join(self.test.extra_paths + ['']) + self.env['PATH']
-            if substring_is_in_list('wine', cmd):
-                wine_paths = ['Z:' + p for p in self.test.extra_paths]
-                wine_path = ';'.join(wine_paths)
-                # Don't accidentally end with an `;` because that will add the
-                # current directory and might cause unexpected behaviour
-                if 'WINEPATH' in self.env:
-                    self.env['WINEPATH'] = wine_path + ';' + self.env['WINEPATH']
-                else:
-                    self.env['WINEPATH'] = wine_path
+            winecmd = []
+            for c in cmd:
+                winecmd.append(c)
+                if os.path.basename(c).startswith('wine'):
+                    self.env['WINEPATH'] = get_wine_shortpath(
+                        winecmd,
+                        ['Z:' + p for p in self.test.extra_paths] + self.env.get('WINEPATH', '').split(';')
+                    )
+                    break
 
         # If MALLOC_PERTURB_ is not set, or if it is set to an empty value,
         # (i.e., the test or the environment don't explicitly set it), set
@@ -641,10 +646,21 @@ class TestHarness:
         self.suites = list(ss)
 
     def __del__(self) -> None:
+        self.close_logfiles()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close_logfiles()
+
+    def close_logfiles(self) -> None:
         if self.logfile:
             self.logfile.close()
+            self.logfile = None
         if self.jsonlogfile:
             self.jsonlogfile.close()
+            self.jsonlogfile = None
 
     def merge_suite_options(self, options: argparse.Namespace, test: 'TestSerialisation') -> typing.Dict[str, str]:
         if ':' in options.setup:
@@ -822,8 +838,9 @@ Timeout:            %4d
         return False
 
     def test_suitable(self, test: 'TestSerialisation') -> bool:
-        return (not self.options.include_suites or TestHarness.test_in_suites(test, self.options.include_suites)) \
-            and not TestHarness.test_in_suites(test, self.options.exclude_suites)
+        return ((not self.options.include_suites or
+                TestHarness.test_in_suites(test, self.options.include_suites)) and not
+                TestHarness.test_in_suites(test, self.options.exclude_suites))
 
     def get_tests(self) -> typing.List['TestSerialisation']:
         if not self.tests:
@@ -838,6 +855,7 @@ Timeout:            %4d
         else:
             tests = self.tests
 
+        # allow specifying test names like "meson test foo1 foo2", where test('foo1', ...)
         if self.options.args:
             tests = [t for t in tests if t.name in self.options.args]
 
@@ -876,7 +894,7 @@ Timeout:            %4d
     def get_wrapper(options: argparse.Namespace) -> typing.List[str]:
         wrap = []  # type: typing.List[str]
         if options.gdb:
-            wrap = ['gdb', '--quiet', '--nh']
+            wrap = [options.gdb_path, '--quiet', '--nh']
             if options.repeat > 1:
                 wrap += ['-ex', 'run', '-ex', 'quit']
             # Signal the end of arguments to gdb
@@ -964,7 +982,7 @@ def list_tests(th: TestHarness) -> bool:
     return not tests
 
 def rebuild_all(wd: str) -> bool:
-    if not os.path.isfile(os.path.join(wd, 'build.ninja')):
+    if not (Path(wd) / 'build.ninja').is_file():
         print('Only ninja backend is supported to rebuild tests before running them.')
         return True
 
@@ -973,11 +991,9 @@ def rebuild_all(wd: str) -> bool:
         print("Can't find ninja, can't rebuild test.")
         return False
 
-    p = subprocess.Popen([ninja, '-C', wd])
-    p.communicate()
-
-    if p.returncode != 0:
-        print('Could not rebuild')
+    ret = subprocess.run([ninja, '-C', wd]).returncode
+    if ret != 0:
+        print('Could not rebuild {}'.format(wd))
         return False
 
     return True
@@ -1010,22 +1026,25 @@ def run(options: argparse.Namespace) -> int:
 
     if not options.list and not options.no_rebuild:
         if not rebuild_all(options.wd):
-            return 1
+            # We return 125 here in case the build failed.
+            # The reason is that exit code 125 tells `git bisect run` that the current commit should be skipped.
+            # Thus users can directly use `meson test` to bisect without needing to handle the does-not-build case separately in a wrapper script.
+            return 125
 
-    try:
-        th = TestHarness(options)
-        if options.list:
-            return list_tests(th)
-        if not options.args:
-            return th.doit()
-        return th.run_special()
-    except TestException as e:
-        print('Meson test encountered an error:\n')
-        if os.environ.get('MESON_FORCE_BACKTRACE'):
-            raise e
-        else:
-            print(e)
-        return 1
+    with TestHarness(options) as th:
+        try:
+            if options.list:
+                return list_tests(th)
+            if not options.args:
+                return th.doit()
+            return th.run_special()
+        except TestException as e:
+            print('Meson test encountered an error:\n')
+            if os.environ.get('MESON_FORCE_BACKTRACE'):
+                raise e
+            else:
+                print(e)
+            return 1
 
 def run_with_args(args: typing.List[str]) -> int:
     parser = argparse.ArgumentParser(prog='meson test')
